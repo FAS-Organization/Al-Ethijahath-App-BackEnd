@@ -1,6 +1,12 @@
 from django.contrib import admin
+from django import forms
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.forms import UserChangeForm, UserCreationForm
+from django.conf import settings
+from django.core.mail import send_mail
+from django.db import transaction
+
+from .models import CustomerCompany, User
 
 from . import models
 
@@ -151,3 +157,75 @@ class AuditEventAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+class CustomerCompanyForm(forms.ModelForm):
+    account_status = forms.ChoiceField(
+        choices=User.Status.choices,
+        label='Account status',
+        help_text='Set to Active and save to approve this customer. They will be emailed.',
+    )
+
+    class Meta:
+        model = CustomerCompany
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.fields['account_status'].initial = (
+                self.instance.account_holder.account_status
+            )
+        else:
+            self.fields['account_status'].initial = User.Status.PENDING_APPROVAL
+
+
+admin.site.unregister(CustomerCompany)
+
+
+@admin.register(CustomerCompany)
+class CustomerCompanyAdmin(admin.ModelAdmin):
+    form = CustomerCompanyForm
+    list_display = ('name', 'contact_name', 'contact_email', 'contact_phone', 'status', 'created_at')
+    list_filter = ('account_holder__account_status', 'is_active')
+    search_fields = ('name', 'contact_name', 'contact_email', 'account_holder__email')
+    ordering = ('-created_at',)
+    list_select_related = ('account_holder',)
+
+    @admin.display(description='Account status', ordering='account_holder__account_status')
+    def status(self, obj):
+        return obj.account_holder.get_account_status_display()
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        new_status = form.cleaned_data['account_status']
+        user = obj.account_holder
+        if user.account_status == new_status:
+            return
+
+        user.account_status = new_status
+        user.is_active = new_status == User.Status.ACTIVE
+        user.save(update_fields=['account_status', 'is_active'])
+
+        if new_status == User.Status.ACTIVE:
+            subject = 'Your Al Ethijahath account is approved'
+            body = (
+                f'Hello {user.get_full_name() or user.email},\n\n'
+                'Your company account has been approved. You can now sign in '
+                'to the Al Ethijahath client portal with your email and password.\n\n'
+                'Al Ethijahath'
+            )
+        elif new_status == User.Status.REJECTED:
+            subject = 'Your Al Ethijahath account request'
+            body = (
+                f'Hello {user.get_full_name() or user.email},\n\n'
+                'We could not approve your account request. Please contact '
+                'our support team for details.\n\nAl Ethijahath'
+            )
+        else:
+            return
+        transaction.on_commit(
+            lambda: send_mail(
+                subject, body, settings.DEFAULT_FROM_EMAIL, [user.email],
+                fail_silently=True,
+            )
+        )

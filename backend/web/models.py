@@ -249,7 +249,7 @@ class CustomerCompany(Record):
     )
     registration_number = models.CharField(max_length=80, blank=True)
     tax_number = models.CharField(max_length=80, blank=True)
-    billing_address = models.TextField()
+    billing_address = models.TextField(blank=True)
     contact_name = models.CharField(max_length=150)
     contact_email = models.EmailField()
     contact_phone = models.CharField(max_length=30)
