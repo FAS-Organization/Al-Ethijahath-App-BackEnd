@@ -1,13 +1,31 @@
-from rest_framework.exceptions import Throttled
+from rest_framework.exceptions import Throttled,ValidationError
 from rest_framework.views import exception_handler
+
+
+def _first_message(detail):
+    if isinstance(detail, dict):
+        for key, value in detail.items():
+            return f'{key}: {_first_message(value)}'
+    if isinstance(detail, (list, tuple)) and detail:
+        return _first_message(detail[0])
+    return str(detail)
 
 
 def api_exception_handler(exc, context):
     response = exception_handler(exc, context)
-    if response is not None and isinstance(exc, Throttled):
+    if response is None:
+        return response
+    if isinstance(exc, Throttled):
         response.data = {
             'code': 'too_many_attempts',
             'message': 'Too many attempts. Please wait and try again.',
+        }
+    elif isinstance(exc, ValidationError):
+        errors = response.data
+        response.data = {
+            'code': 'validation_error',
+            'message': _first_message(errors),
+            'errors': errors,
         }
     return response
 

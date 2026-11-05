@@ -185,8 +185,8 @@ admin.site.unregister(CustomerCompany)
 @admin.register(CustomerCompany)
 class CustomerCompanyAdmin(admin.ModelAdmin):
     form = CustomerCompanyForm
-    list_display = ('name', 'contact_name', 'contact_email', 'contact_phone', 'status', 'created_at')
-    list_filter = ('account_holder__account_status', 'is_active')
+    list_display = ('name', 'contact_name', 'contact_email', 'contact_phone', 'regions', 'status', 'created_at')
+    list_filter = ('account_holder__account_status', 'sites__region', 'is_active')
     search_fields = ('name', 'contact_name', 'contact_email', 'account_holder__email')
     ordering = ('-created_at',)
     list_select_related = ('account_holder',)
@@ -194,6 +194,13 @@ class CustomerCompanyAdmin(admin.ModelAdmin):
     @admin.display(description='Account status', ordering='account_holder__account_status')
     def status(self, obj):
         return obj.account_holder.get_account_status_display()
+        
+    @admin.display(description='Region')
+    def regions(self, obj):
+        return ', '.join(sorted({s.region.name for s in obj.sites.all()})) or '-'
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related('sites__region')
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)

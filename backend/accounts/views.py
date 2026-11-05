@@ -12,7 +12,7 @@ from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from web.models import CustomerCompany
+from web.models import CustomerCompany, CustomerSite, Region
 
 from .utils import user_payload
 
@@ -107,6 +107,11 @@ def register_view(request):
         validate_password(password)
     except ValidationError as exc:
         errors['password'] = ' '.join(exc.messages)
+    region = None
+    try:
+        region = Region.objects.get(pk=int(data.get('regionId')), is_active=True)
+    except (TypeError, ValueError, Region.DoesNotExist):
+        errors['regionId'] = 'Select your region.'
     if errors:
         return Response(
             {
@@ -136,12 +141,21 @@ def register_view(request):
             )
             user.set_password(password)
             user.save()
-            CustomerCompany.objects.create(
+            company = CustomerCompany.objects.create(
                 name=company_name,
                 account_holder=user,
                 billing_address='',
                 contact_name=full_name,
                 contact_email=email,
+                contact_phone=phone,
+                created_by=user,
+            )
+            CustomerSite.objects.create(
+                company=company,
+                region=region,
+                name='Main site',
+                address='',
+                contact_name=full_name,
                 contact_phone=phone,
                 created_by=user,
             )
@@ -165,3 +179,10 @@ def logout_view(request):
 @permission_classes([IsAuthenticated])
 def me_view(request):
     return Response(user_payload(request.user))
+
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def regions_view(request):
+    regions = Region.objects.filter(is_active=True).order_by('name')
+    return Response([{'id': r.id, 'name': r.name, 'code': r.code} for r in regions])

@@ -265,7 +265,7 @@ class CustomerSite(Record):
     )
     region = models.ForeignKey(Region, on_delete=models.PROTECT)
     name = models.CharField(max_length=150)
-    address = models.TextField()
+    address = models.TextField(blank=True)
     contact_name = models.CharField(max_length=150, blank=True)
     contact_phone = models.CharField(max_length=30, blank=True)
     is_active = models.BooleanField(default=True)
