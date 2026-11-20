@@ -126,11 +126,13 @@ STATIC_URL = 'static/'
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+# --- Email ---
+# Console backend prints emails in the terminal. Set EMAIL_BACKEND in .env for real email.
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Al Ethijahath <no-reply@localhost>')
+
+# --- Uploaded files (private: no MEDIA_URL, so nothing is served publicly) ---
+MEDIA_ROOT = BASE_DIR / 'media'
 
 AUTH_USER_MODEL = 'web.User'
 
