@@ -3,6 +3,11 @@ import tempfile
 from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
+from uuid import uuid4
+from unittest.mock import patch
+
+from django.core.management import call_command
+from django.urls import reverse
 
 from django.core import mail
 from django.core.exceptions import ValidationError
@@ -138,3 +143,163 @@ class PortalTests(APITestCase):
         flags={"channels":{"email":False,"whatsapp":False,"sms":True},"topics":{"quotations":True,"visits":False,"payments":True}}
         self.assertEqual(self.client.put(C+"account/preferences/",flags,format="json").status_code,200)
         self.assertEqual(self.client.get(C+"account/").data["account"]["preferences"],flags)
+
+    def machine_and_technician(self):
+        tech = m.EmployeeProfile.objects.create(user=self.staff, region=self.r, employee_id="T-001", job_title="Technician")
+        machine = m.JobEquipment.objects.create(job=self.job(), equipment=self.e, suffix="A", assigned_technician=tech)
+        return machine, tech
+
+    def report(self):
+        machine, tech = self.machine_and_technician()
+        return m.InspectionReport.objects.create(job_equipment=machine, technician=tech, inspected_at=timezone.now(),
+            remarks="Repair required", status="pending_approval", submitted_at=timezone.now())
+
+    def signed(self, report):
+        self.client.force_authenticate(self.staff)
+        return self.post(S+f"reports/inspection/{report.pk}/tablet-approval/", {
+            "signer_name":self.co.contact_name, "customer_signature":image(), "technician_signature":image()
+        }, fmt="multipart")
+
+    def test_tablet_approval_and_private_published_report(self):
+        report=self.report()
+        url=S+f"reports/inspection/{report.pk}/tablet-approval/"
+        self.post(url,{},403)
+        self.client.force_authenticate(self.staff)
+        self.post(url,{"signer_name":"Unregistered signer","customer_signature":image(),"technician_signature":image()},400,"multipart")
+        self.assertEqual(report.approvals.count(),0)
+        self.assertEqual(self.signed(report)["status"],"approved")
+        self.assertEqual(set(report.approvals.values_list("signer_role",flat=True)),{"customer","technician"})
+        self.post(url,{},400)
+        document=self.post(S+f"documents/inspection/{report.pk}/publish/",{})
+        self.assertEqual(self.post(S+f"documents/inspection/{report.pk}/publish/",{})["id"],document["id"])
+        url=C+f"files/pdf/{document['id']}/"
+        self.client.force_authenticate(self.owner)
+        response=self.client.get(url)
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(b"".join(response.streaming_content).startswith(b"%PDF-"))
+        self.assertEqual(self.client.get(C+"documents/").data["documents"][0]["source_status"],"approved")
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.get(url).status_code,404)
+
+    def quote(self, report):
+        return m.Quotation.objects.create(job_equipment=report.job_equipment, inspection_report=report, region=self.r,
+            currency="SAR", customer_summary="Replace seals", estimated_completion_text="Two working days",
+            status="sent", sent_at=timezone.now(), expires_at=timezone.now()+timedelta(days=4), number="Q-5")
+
+    def test_quote_decision_and_verified_email_version(self):
+        report=self.report()
+        self.signed(report)
+        quote=self.quote(report)
+        doc=self.post(S+f"documents/quotation/{quote.pk}/publish/",{})
+        self.client.force_authenticate(self.owner)
+        self.post(C+f"quotations/{quote.pk}/decision/",{"version":1,"decision":"approved"},400)
+        queued=self.post(C+f"quotations/{quote.pk}/email/",{"version":1},202)
+        call_command("process_portal")
+        email_req=m.QuoteEmailRequest.objects.get(pk=queued["id"])
+        self.assertIsNotNone(email_req.sent_at)
+        emails=[e for e in mail.outbox if e.attachments]
+        self.assertEqual(emails[0].to,[self.owner.email])
+        self.assertTrue(emails[0].attachments[0].content.startswith(b"%PDF-"))
+        self.client.force_authenticate(self.staff)
+        url=S+f"quotations/{quote.pk}/verify-reply/"
+        data={"version":1,"email_request":email_req.pk,"sender":self.other.email,"cc":"purchasing@example.com","role":"Owner",
+              "signer_name":self.co.contact_name,"purchase_order_note":"Confirmed company does not issue a PO"}
+        def proof():
+            return SimpleUploadedFile("original.eml",b"Customer reply","message/rfc822")
+        self.post(url,{**data,"email_evidence":proof()},400,"multipart")
+        self.post(url,{**data,"sender":self.owner.email,"email_evidence":proof()},200,"multipart")
+        event=quote.approvals.get()
+        self.assertEqual((event.reviewed_document_id,event.document_sha256,event.created_by_id),(doc["id"],doc["sha256"],self.staff.pk))
+        self.client.force_authenticate(self.owner)
+        self.post(C+f"quotations/{quote.pk}/decision/",{"version":1,"decision":"rejected"},400)
+
+    def test_signed_email_return_needs_technician_and_verified_sender(self):
+        report=self.report()
+        self.client.force_authenticate(self.staff)
+        self.post(S+f"reports/inspection/{report.pk}/technician-signature/",{"technician_signature":image()},201,"multipart")
+        doc=self.post(S+f"documents/inspection/{report.pk}/publish/",{})
+        pdf=m.GeneratedDocument.objects.get(pk=doc["id"])
+        with pdf.file.open("rb") as fp:
+            signed=fp.read()
+        row=m.EmailApprovalSubmission.objects.create(source_document=pdf,signing_user=self.owner,signer_name=self.co.contact_name,
+            signer_email=self.owner.email,sender_email=self.other.email,received_at=timezone.now(),
+            signed_pdf=SimpleUploadedFile("signed.pdf",signed,"application/pdf"),
+            email_evidence=SimpleUploadedFile("reply.eml",b"Email evidence"))
+        path=S+f"reports/email-returns/{row.pk}/verify/"
+        self.post(path,{},400)
+        row.sender_email=self.owner.email
+        row.save()
+        self.post(path,{})
+        result=self.post(S+f"documents/inspection/{report.pk}/publish/",{})
+        self.assertEqual(result["sha256"],doc["sha256"])
+        self.assertEqual(report.approvals.filter(email_submission=row).count(),1)
+
+    def test_reschedule_keeps_original_until_staff_confirm(self):
+        machine,tech=self.machine_and_technician()
+        start=(timezone.now()+timedelta(days=4)).replace(hour=10,minute=0,second=0,microsecond=0)
+        visit=m.ServiceAppointment.objects.create(job_equipment=machine,technician=tech,purpose="maintenance",
+            scheduled_start=start,scheduled_end=start+timedelta(hours=1))
+        r=self.post(C+f"appointments/{visit.pk}/reschedule/",{"date":str((start+timedelta(days=1)).date()),"reason":"Site closed"},201)
+        action=S+f"reschedules/{r['id']}/review/"
+        self.client.force_authenticate(self.staff)
+        alt=start+timedelta(days=2)
+        self.post(action,{"action":"alternative","date":str(alt.date())})
+        times={"action":"confirm","start":alt.isoformat(),"end":(alt+timedelta(hours=1)).isoformat()}
+        self.post(action,times,400)
+        self.client.force_authenticate(self.other)
+        self.post(C+f"reschedules/{r['id']}/respond/",{"action":"accept_alternative"},404)
+        self.client.force_authenticate(self.owner)
+        self.post(C+f"reschedules/{r['id']}/respond/",{"action":"accept_alternative"})
+        visit.refresh_from_db()
+        self.assertEqual(visit.scheduled_start,start)
+        self.client.force_authenticate(self.staff)
+        self.post(action,times)
+        visit.refresh_from_db()
+        self.assertEqual((visit.scheduled_start,visit.schedule_version),(alt,2))
+
+    def test_ledger_statement_dashboard_and_chat_agree(self):
+        from customer.chat import context
+        invoice=self.invoice()
+        self.client.force_authenticate(self.staff)
+        self.post(S+f"invoices/{invoice.pk}/credit-notes/",{"number":"CN-30","reason":"Adjustment","amount":"30"},201)
+        pay={"idempotency_key":str(uuid4()),"amount":"24.00","method":"cash","paid_at":timezone.now().isoformat()}
+        payment=self.post(S+f"invoices/{invoice.pk}/payments/",pay,201)
+        self.assertEqual(self.post(S+f"invoices/{invoice.pk}/payments/",pay)["id"],payment["id"])
+        self.post(S+f"invoices/{invoice.pk}/payments/",{**pay,"amount":"10.00"},400)
+        self.post(S+f"billing/invoice/{invoice.pk}/void/",{"reason":"Duplicated"},400)
+        self.client.force_authenticate(self.owner)
+        data=self.client.get(C+"dashboard/").data["invoices"][0]
+        self.assertEqual((data["totalMinor"],data["paidMinor"],data["creditMinor"],data["balanceMinor"]),(10000,2400,3000,4600))
+        self.assertEqual(context(self.co)["balances_by_currency"]["SAR"]["outstanding"],Decimal("46"))
+        bill=self.client.get(C+"maintenance/").data["invoices"][0]
+        self.assertEqual((bill["total"],bill["paid"],bill["credited"],bill["outstanding"]),("100.00","24.00","30.00","46.00"))
+        with patch("customer.pdf.render_pdf",return_value=b"%PDF-test") as render:
+            self.assertEqual(self.client.get(C+"billing/statement/").status_code,200)
+        rows=render.call_args.args[2]
+        self.assertEqual({(r[2],r[-1]) for r in rows[1:]},{("Invoice","100.00"),("Payment","-24.00"),("Credit CN-30","-30.00")})
+        note=next(n for n in self.client.get(C+"notifications/").data["notifications"] if n["event_type"]=="credit_issued")
+        self.post(C+f"notifications/{note['id']}/read/",{"read":True})
+        self.assertEqual(context(self.co2)["issued_invoices"],[])
+
+    def test_rental_admin_requires_region_and_billing_action_works_in_staff_session(self):
+        from django.contrib.auth.models import Permission
+        from django.test import Client
+        regional=m.User.objects.create_user("counter@example.com","staff-only",is_staff=True,is_active=True,account_status="active")
+        m.EmployeeProfile.objects.create(user=regional,region=self.r,employee_id="R-10",job_title="Rental counter")
+        regional.user_permissions.add(*Permission.objects.filter(content_type__app_label="web",codename__in=["add_rentalitem","view_rentalitem","view_region"]))
+        browser=Client()
+        browser.force_login(regional)
+        url=reverse("admin:web_rentalitem_add")
+        form=browser.get(url).context["adminform"].form
+        self.assertEqual(list(form.fields)[0],"region")
+        self.assertEqual(list(form.fields["region"].queryset),[self.r])
+        data={"region":self.j.pk,"code":"test","name":"Drill","category":"Tools","available":1,"is_active":"on"}
+        self.assertEqual(browser.post(url,data).status_code,200)
+        self.assertFalse(m.RentalItem.objects.exists())
+        self.assertEqual(browser.post(url,{**data,"region":self.r.pk}).status_code,302)
+        invoice=self.invoice()
+        action=reverse("portal-workflow",args=["invoice-credit",invoice.pk])
+        self.assertEqual(browser.get(action).status_code,403)
+        browser.force_login(self.staff)
+        self.assertEqual(browser.post(action,{"number":"CN-admin","reason":"Rate correction","amount":"9.00"}).status_code,302)
+        self.assertEqual(invoice.balance_due,Decimal("91.00"))
