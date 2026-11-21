@@ -80,30 +80,38 @@ def monthly():
     for contract in AMCContract.objects.exclude(status="draft").select_related("company__region"):
         c=contract.company
         tz=ZoneInfo(c.region.timezone if c.region_id else "Asia/Riyadh")
-        end=timezone.localdate(timezone=tz).replace(day=1)
-        start=(end-timedelta(days=1)).replace(day=1)
-        if contract.start_date>=end or contract.end_date<start:
-            continue
-        with transaction.atomic():
-            snapshot,_=AMCMonthlySummary.objects.get_or_create(contract=contract,month_start=start)
-            snapshot=AMCMonthlySummary.objects.select_for_update().get(pk=snapshot.pk)
-            if snapshot.published_at:
-                continue
-            visits=[]
-            for v in ServiceAppointment.objects.filter(job_equipment__amc_coverage__contract=contract,job_equipment__job__company=c,
-                    status="completed",purpose="maintenance").select_related("job_equipment__equipment","job_equipment__job__site"):
-                when=timezone.localdate(v.actual_end or v.scheduled_end,timezone=tz)
-                if start<=when<end:
-                    m=v.job_equipment
-                    visits.append({"id":v.pk,"date":when.isoformat(),"reference":m.reference,"site":m.job.site.name,
-                        "equipment":{"id":m.equipment_id,"name":str(m.equipment),"asset":m.equipment.customer_asset_number}})
-            snapshot.visits=visits
-            snapshot.summary=f"{len(visits)} completed maintenance visits for {contract.contract_number} in {start:%B %Y}."
-            table=[["Date","Site","Equipment","Reference"]]+[[v["date"],v["site"],v["equipment"]["name"],v["reference"]] for v in visits]
-            snapshot.file.save("monthly-summary.pdf",ContentFile(render_pdf("AMC monthly summary",[c.name,snapshot.summary],table)),save=False)
-            snapshot.published_at=timezone.now()
-            snapshot.save()
-            notify(c,"amc_summary",f"amc-summary:{snapshot.pk}","Your monthly AMC summary",snapshot.summary,"/maintenance")
+        current_month=timezone.localdate(timezone=tz).replace(day=1)
+        last_month=min(current_month-timedelta(days=1), contract.end_date)
+        start=contract.start_date.replace(day=1)
+        published=set(contract.monthly_summaries.filter(published_at__isnull=False).values_list("month_start",flat=True))
+        while start<=last_month:
+            end=(start.replace(day=28)+timedelta(days=4)).replace(day=1)
+            if start not in published:
+                publish_month(contract,c,tz,start,end)
+            start=end
+
+
+def publish_month(contract,c,tz,start,end):
+    with transaction.atomic():
+        snapshot,_=AMCMonthlySummary.objects.get_or_create(contract=contract,month_start=start)
+        snapshot=AMCMonthlySummary.objects.select_for_update().get(pk=snapshot.pk)
+        if snapshot.published_at:
+            return
+        visits=[]
+        for v in ServiceAppointment.objects.filter(job_equipment__amc_coverage__contract=contract,job_equipment__job__company=c,
+                status="completed",purpose="maintenance").select_related("job_equipment__equipment","job_equipment__job__site"):
+            when=timezone.localdate(v.actual_end or v.scheduled_end,timezone=tz)
+            if start<=when<end:
+                m=v.job_equipment
+                visits.append({"id":v.pk,"date":when.isoformat(),"reference":m.reference,"site":m.job.site.name,
+                    "equipment":{"id":m.equipment_id,"name":str(m.equipment),"asset":m.equipment.customer_asset_number}})
+        snapshot.visits=visits
+        snapshot.summary=f"{len(visits)} completed maintenance visits for {contract.contract_number} in {start:%B %Y}."
+        table=[["Date","Site","Equipment","Reference"]]+[[v["date"],v["site"],v["equipment"]["name"],v["reference"]] for v in visits]
+        snapshot.file.save("monthly-summary.pdf",ContentFile(render_pdf("AMC monthly summary",[c.name,snapshot.summary],table)),save=False)
+        snapshot.published_at=timezone.now()
+        snapshot.save()
+        notify(c,"amc_summary",f"amc-summary:{snapshot.pk}","Your monthly AMC summary",snapshot.summary,"/maintenance")
 
 
 def send_quote(pk):

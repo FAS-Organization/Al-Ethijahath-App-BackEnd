@@ -1,13 +1,14 @@
 from django.contrib import admin
 from django.urls import include, path
 
-from web import operations, staff_forms
+from web import operations, staff_files, staff_forms
 from web.publication import publish_view
 from customer import decisions, schedule
 from customer.ledger import issue_credit_note
 from customer.rentals import review as rental_review
 
 urlpatterns = [
+    path("admin/portal-files/<slug:kind>/<int:pk>/<slug:field>/",admin.site.admin_view(staff_files.download),name="portal-staff-file"),
     path("admin/portal/<slug:task>/<int:pk>/", admin.site.admin_view(staff_forms.workflow), name="portal-workflow"),
     path("api/v1/staff/reports/<str:kind>/<int:pk>/submit/", operations.submit_report),
     path("api/v1/staff/billing/<str:kind>/<int:pk>/void/", operations.void_entry),

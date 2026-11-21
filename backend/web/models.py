@@ -1132,6 +1132,28 @@ class Invoice(Record):
                 "Currency must match region.",
             )
 
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            return super().save(*args, **kwargs)
+        with transaction.atomic():
+            original = Invoice.objects.select_for_update().get(pk=self.pk)
+            if original.status != self.Status.DRAFT:
+                fixed = ("company_id", "region_id", "job_id", "number", "currency", "issue_date",
+                         "due_date", "issued_at", "subtotal", "discount", "tax_amount", "total", "billing_snapshot")
+                if any(getattr(self, field) != getattr(original, field) for field in fixed):
+                    raise ValidationError("Preserve the issued invoice and record adjustments separately.")
+                if original.status != self.status and (
+                    original.status != self.Status.ISSUED or self.status != self.Status.VOID
+                    or not self.void_reason.strip() or original.amount_credited or original.amount_paid
+                ):
+                    raise ValidationError("This invoice cannot be voided with posted payments or credits.")
+            return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status != self.Status.DRAFT:
+            raise ValidationError("Preserve issued and void invoices in the ledger.")
+        return super().delete(*args, **kwargs)
+
     @property
     def amount_paid(self):
         if not self.pk:
@@ -1334,8 +1356,8 @@ class Payment(Record):
                 "corrects",
                 "Correction must use the same invoice.",
             )
-        # Posting service must lock invoice, reject overpayment and non-issued
-        # invoices, and reuse request idempotency_key for retries.
+        if self.corrects_id and self.corrects.status != self.Status.VOID:
+            raise ValidationError({"corrects": "Void the original entry before posting a correction."})
 
 
     def save(self, *args, **kwargs):
@@ -1346,8 +1368,13 @@ class Payment(Record):
             if self.status == self.Status.POSTED:
                 if invoice.status != Invoice.Status.ISSUED or Decimal(str(self.amount)) > invoice.total - paid - invoice.amount_credited:
                     raise ValidationError({"amount": "Payment exceeds the issued invoice's remaining balance."})
-            if self.pk and Payment.objects.filter(pk=self.pk).exclude(invoice=invoice).exists():
-                raise ValidationError("A payment cannot be moved to another invoice.")
+            if self.pk:
+                original = Payment.objects.select_for_update().get(pk=self.pk)
+                fixed = ("invoice_id", "amount", "paid_at", "method", "transaction_reference", "corrects_id", "idempotency_key")
+                if any(getattr(self, field) != getattr(original, field) for field in fixed):
+                    raise ValidationError("Void and replace a posted payment to correct its details.")
+                if original.status == self.Status.VOID and self.status != original.status:
+                    raise ValidationError("A void payment cannot be reposted.")
             return super().save(*args, **kwargs)
 
 

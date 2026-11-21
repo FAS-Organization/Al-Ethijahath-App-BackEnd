@@ -51,6 +51,10 @@ def issue(request, kind, pk):
         except InvalidLine as exc:
             raise serializers.ValidationError(exc.messages) from exc
     record.subtotal = sum((line.line_total for line in lines), Decimal("0"))
+    for field in ("discount","tax_amount"):
+        if field in request.data:
+            amount = value(serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0")), request.data, field)
+            setattr(record, field, amount)
     record.total = record.subtotal - record.discount + record.tax_amount
     record.billing_snapshot = {"name": company.name, "address": company.billing_address, "tax_number": company.tax_number}
     now = timezone.now()
@@ -82,6 +86,7 @@ class PaymentForm(serializers.Serializer):
     method = serializers.ChoiceField(choices=["cash", "bank_transfer", "qr", "other"])
     paid_at = serializers.DateTimeField()
     transaction_reference = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    corrects_id = serializers.IntegerField(min_value=1, required=False)
 
 
 @api_view(["POST"])
@@ -98,6 +103,8 @@ def record_payment(request, pk):
         if old.invoice_id != pk or any(getattr(old, key) != val for key, val in fields.items()):
             raise serializers.ValidationError("This payment reference has already been used.")
         return Response({"id": old.pk, "balance_due": str(invoice.balance_due)})
+    if "corrects_id" in fields:
+        get_object_or_404(invoice.payments, pk=fields["corrects_id"], status="void")
     row = checked(m.Payment(invoice=invoice, created_by=request.user, **fields))
     audit(request.user, "payment.posted", row, invoice=pk)
     return Response({"id": row.pk, "balance_due": str(invoice.balance_due)}, status=201)

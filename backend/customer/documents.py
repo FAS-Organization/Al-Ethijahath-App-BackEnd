@@ -53,6 +53,13 @@ def archive(company):
         rows.append({"id":f"attachment-{a.pk}","type":"attachment","title":a.caption or "Service attachment",
             "reference":a.job_equipment.reference,"equipment":str(a.job_equipment.equipment),"site_names":[a.job_equipment.job.site.name],
             "date":a.created_at,"file_url":file_url("attachment",a.pk),"visibility":"customer","details":[]})
+    for summary in AMCMonthlySummary.objects.filter(contract__company=company,published_at__lte=timezone.now()).exclude(
+            contract__status="draft").exclude(file="").select_related("contract"):
+        rows.append({"id":f"monthly-{summary.pk}","type":"monthly_summary","title":"AMC monthly summary",
+            "number":summary.contract.contract_number,"reference":summary.contract.contract_number,
+            "date":summary.month_start,"source_status":"published","visibility":"customer",
+            "site_names":sorted({v["site"] for v in summary.visits}),"details":[],
+            "file_url":file_url("monthly",summary.pk)})
     return rows
 
 

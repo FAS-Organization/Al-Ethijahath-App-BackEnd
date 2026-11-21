@@ -16,7 +16,7 @@ def staff_region(user, permission, region_id):
         raise PermissionDenied()
     if not user.is_superuser:
         employee = getattr(user, "employee", None)
-        if not employee or not (employee.global_scope or employee.region_id == region_id):
+        if not employee or not (employee.global_scope or (region_id is not None and employee.region_id == region_id)):
             raise PermissionDenied()
 
 

@@ -1,6 +1,9 @@
 {% extends "admin/base_site.html" %}
+{% load static %}
+{% block extrahead %}{{ block.super }}<script defer src="{% static 'web/signature-pad.js' %}"></script>{% endblock %}
 {% block content %}
 <p>{{ object }}</p>
+{% if evidence %}<ul>{% for url, label in evidence %}<li><a href="{{ url }}">{{ label }}</a></li>{% endfor %}</ul>{% endif %}
 <form method="post" enctype="multipart/form-data">
     {% csrf_token %}
     {{ form.as_p }}

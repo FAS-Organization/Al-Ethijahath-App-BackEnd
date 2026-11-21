@@ -13,6 +13,7 @@ from customer import decisions, ledger, rentals, schedule
 from . import models as m
 from . import operations, publication
 from .portal_admin import scoped
+from .staff_files import link
 
 
 class Credit(forms.Form):
@@ -26,6 +27,7 @@ class Pay(forms.Form):
     method = forms.ChoiceField(choices=m.Payment._meta.get_field("method").choices)
     paid_at = forms.DateTimeField(initial=timezone.now)
     transaction_reference = forms.CharField(required=False)
+    corrects_id = forms.IntegerField(required=False,label="Voided payment ID being replaced (optional)")
     idempotency_key = forms.UUIDField(widget=forms.HiddenInput, initial=uuid4)
 
 
@@ -33,19 +35,24 @@ class Reason(forms.Form):
     reason = forms.CharField(widget=forms.Textarea)
 
 
-class IssueQuote(forms.Form):
+class IssueDocument(forms.Form):
+    discount = forms.DecimalField(min_value=0, decimal_places=2, required=False, label="Discount (optional override)")
+    tax_amount = forms.DecimalField(min_value=0, decimal_places=2, required=False, label="Tax (optional override)")
+
+
+class IssueQuote(IssueDocument):
     expires_at = forms.DateTimeField(label="Quotation expiry (include the time zone)")
 
 
 class TechnicianSignature(forms.Form):
-    technician_signature = forms.ImageField(label="Signature captured on the technician's tablet")
+    technician_signature = forms.ImageField(widget=forms.ClearableFileInput(attrs={"data-signature-pad":"true"}),label="Signature captured on the technician's tablet")
 
 
 class Tablet(forms.Form):
     signer_name = forms.CharField(label="Registered name of the account holder or authorized signer")
     approver_id = forms.IntegerField(required=False, label="Named approver ID (leave blank for the account holder)")
-    customer_signature = forms.ImageField(label="Customer signature captured on site")
-    technician_signature = forms.ImageField(required=False, label="Technician signature (if not recorded yet)")
+    customer_signature = forms.ImageField(widget=forms.ClearableFileInput(attrs={"data-signature-pad":"true"}),label="Customer signature captured on site")
+    technician_signature = forms.ImageField(widget=forms.ClearableFileInput(attrs={"data-signature-pad":"true"}),required=False, label="Technician signature (if not recorded yet)")
 
 
 class QuoteReply(forms.Form):
@@ -77,7 +84,7 @@ TASKS = {
     "invoice-pay": (m.Invoice, "add_payment","Record payment", Pay, operations.record_payment, {}),
     "invoice-void": (m.Invoice, "change_invoice","Void invoice", Reason, operations.void_entry, {"kind":"invoice"}),
     "payment-void": (m.Payment, "change_payment","Void payment entry", Reason, operations.void_entry, {"kind":"payment"}),
-    "invoice-issue": (m.Invoice, "change_invoice","Issue invoice and generate its PDF", forms.Form, operations.issue, {"kind":"invoice"}),
+    "invoice-issue": (m.Invoice, "change_invoice","Issue invoice and generate its PDF", IssueDocument, operations.issue, {"kind":"invoice"}),
     "quotation-issue": (m.Quotation,"change_quotation","Send quotation and generate its PDF",IssueQuote,operations.issue,{"kind":"quotation"}),
     "quotation-reply": (m.Quotation,"verify_quotation_reply","Verify a quotation reply", QuoteReply, decisions.verify_reply, {}),
     "report-return": (m.EmailApprovalSubmission,"verify_email_approval","Verify signed report PDF",forms.Form,decisions.verify_return,{}),
@@ -121,5 +128,10 @@ def workflow(request, task, pk):
         data = response.data
         error = data.get("message") or data.get("detail") if isinstance(data,dict) else data
         form.add_error(None, str(error or data))
+    evidence = []
+    if task == "report-return":
+        evidence = [(link("pdf",obj.source_document_id,"file"),"Original PDF"),
+                    (link("return",obj.pk,"signed_pdf"),"Returned signed PDF"),
+                    (link("return",obj.pk,"email_evidence"),"Original email")]
     return render(request,"admin/portal_operation.html",
-                  {**admin.site.each_context(request),"title":title,"object":obj,"form":form})
+                  {**admin.site.each_context(request),"title":title,"object":obj,"form":form,"evidence":evidence})

@@ -164,7 +164,7 @@ class CommercialAdmin(WorkflowAdmin):
         base = super().get_readonly_fields(request, obj)
         if obj and obj.status != "draft":
             return [*base, *(f.name for f in self.model._meta.fields if f.editable)]
-        return [*base, "status", "billing_snapshot", "subtotal", "total"]
+        return [*base, "status", "billing_snapshot", "subtotal", "total","discount","tax_amount"]
 
     def has_delete_permission(self, request, obj=None):
         return bool(obj and obj.status == "draft" and super().has_delete_permission(request, obj))
