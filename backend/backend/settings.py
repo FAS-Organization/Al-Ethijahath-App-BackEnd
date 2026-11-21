@@ -128,7 +128,7 @@ AUTH_USER_MODEL = 'web.User'
 # --- API ---
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'accounts.authentication.PortalAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
@@ -140,6 +140,7 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'CHECK_REVOKE_TOKEN': True,
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
 }
@@ -149,3 +150,34 @@ CORS_ALLOWED_ORIGINS = os.getenv(
     'CORS_ALLOWED_ORIGINS',
     'http://localhost:5173,http://localhost:3000',
 ).split(',')
+
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "").lower() == "true"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "").lower() == "true"
+EMAIL_TIMEOUT = 15
+CSRF_TRUSTED_ORIGINS = [v.strip() for v in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if v.strip()]
+if not DEBUG and SECRET_KEY == "dev-only-insecure-key":
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured("Set a private SECRET_KEY when DEBUG is false.")
+if os.getenv("POSTGRES_DB") or os.getenv("DB_NAME"):
+    DATABASES["default"] = {"ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv("POSTGRES_DB") or os.environ["DB_NAME"],
+        "USER": os.getenv("POSTGRES_USER") or os.getenv("DB_USER", ""),
+        "PASSWORD": os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD", ""),
+        "HOST": os.getenv("POSTGRES_HOST") or os.getenv("DB_HOST", ""),
+        "PORT": os.getenv("POSTGRES_PORT") or os.getenv("DB_PORT", "5432")}
+else:
+    DATABASES["default"]["OPTIONS"] = {"transaction_mode": "IMMEDIATE", "timeout": 15}
+if os.getenv("R2_PRIVATE_BUCKET"):
+    STORAGES = {
+        "default": {"BACKEND": "storages.backends.s3.S3Storage", "OPTIONS": {
+            "bucket_name": os.environ["R2_PRIVATE_BUCKET"], "endpoint_url": os.environ["R2_ENDPOINT_URL"],
+            "access_key": os.environ["R2_ACCESS_KEY_ID"], "secret_key": os.environ["R2_SECRET_ACCESS_KEY"],
+            "region_name": "auto", "signature_version": "s3v4", "default_acl": None, "file_overwrite": False,
+            "custom_domain": None, "querystring_auth": True, "querystring_expire": 60,
+        }},
+        "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+    }

@@ -72,7 +72,12 @@ def login_view(request):
     if company is not None and not company.is_active:
         return fail('inactive', 403)
 
+    grant = getattr(user, 'service_access', None)
+    if grant and not grant.enabled:
+        return fail('inactive', 403)
     refresh = RefreshToken.for_user(user)
+    if grant:
+        refresh['access_version'] = grant.token_version
     return Response({
         'access': str(refresh.access_token),
         'refresh': str(refresh),
@@ -109,7 +114,169 @@ def register_view(request):
         errors['password'] = ' '.join(exc.messages)
     region = None
     try:
-        region = Region.objects.get(pk=int(data.get('regionId')), is_active=True)
+        candidates = Region.objects.filter(is_active=True, name__iregex=r'^(Riyadh|Jeddah|Dammam)
+    except (TypeError, ValueError, Region.DoesNotExist):
+        errors['regionId'] = 'Select your region.'
+    if errors:
+        return Response(
+            {
+                'code': 'validation_error',
+                'message': next(iter(errors.values())),
+                'errors': errors,
+            },
+            status=400,
+        )
+
+    ok = Response({'ok': True, 'message': REGISTERED_MESSAGE}, status=201)
+
+    # Same answer for an existing email, so emails cannot be probed.
+    if User.objects.filter(email__iexact=email).exists():
+        return ok
+
+    first_name, _, last_name = full_name.partition(' ')
+    try:
+        with transaction.atomic():
+            user = User(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone=phone,
+                account_status='pending_approval',
+                is_active=False,
+            )
+            user.set_password(password)
+            user.save()
+            company = CustomerCompany.objects.create(
+                name=company_name,
+                region=region,
+                account_holder=user,
+                billing_address='',
+                contact_name=full_name,
+                contact_email=email,
+                contact_phone=phone,
+                created_by=user,
+            )
+            CustomerSite.objects.create(
+                company=company,
+                region=region,
+                name='Main site',
+                address='',
+                contact_name=full_name,
+                contact_phone=phone,
+                created_by=user,
+            )
+    except IntegrityError:
+        pass
+    return ok
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def logout_view(request):
+    try:
+        RefreshToken(request.data.get('refresh')).blacklist()
+    except TokenError:
+        pass
+    return Response({'ok': True})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def me_view(request):
+    return Response(user_payload(request.user))
+
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def regions_view(request):
+    regions = Region.objects.filter(is_active=True, name__iregex=r'^(Riyadh|Jeddah|Dammam)
+    return Response([{'id': r.id, 'name': r.name, 'code': r.code} for r in regions]))
+        if data.get('regionId') is not None:
+            region = candidates.get(pk=int(data['regionId']))
+        else:
+            region = candidates.get(name__iexact=str(data.get('region') or '').strip())
+    except (TypeError, ValueError, Region.DoesNotExist):
+        errors['regionId'] = 'Select your region.'
+    if errors:
+        return Response(
+            {
+                'code': 'validation_error',
+                'message': next(iter(errors.values())),
+                'errors': errors,
+            },
+            status=400,
+        )
+
+    ok = Response({'ok': True, 'message': REGISTERED_MESSAGE}, status=201)
+
+    # Same answer for an existing email, so emails cannot be probed.
+    if User.objects.filter(email__iexact=email).exists():
+        return ok
+
+    first_name, _, last_name = full_name.partition(' ')
+    try:
+        with transaction.atomic():
+            user = User(
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                phone=phone,
+                account_status='pending_approval',
+                is_active=False,
+            )
+            user.set_password(password)
+            user.save()
+            company = CustomerCompany.objects.create(
+                name=company_name,
+                account_holder=user,
+                billing_address='',
+                contact_name=full_name,
+                contact_email=email,
+                contact_phone=phone,
+                created_by=user,
+            )
+            CustomerSite.objects.create(
+                company=company,
+                region=region,
+                name='Main site',
+                address='',
+                contact_name=full_name,
+                contact_phone=phone,
+                created_by=user,
+            )
+    except IntegrityError:
+        pass
+    return ok
+
+
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def logout_view(request):
+    try:
+        RefreshToken(request.data.get('refresh')).blacklist()
+    except TokenError:
+        pass
+    return Response({'ok': True})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def me_view(request):
+    return Response(user_payload(request.user))
+
+@api_view(['GET'])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def regions_view(request):
+    regions = Region.objects.filter(is_active=True).order_by('name')
+    return Response([{'id': r.id, 'name': r.name, 'code': r.code} for r in regions])).order_by('name')
+    return Response([{'id': r.id, 'name': r.name, 'code': r.code} for r in regions]))
+        if data.get('regionId') is not None:
+            region = candidates.get(pk=int(data['regionId']))
+        else:
+            region = candidates.get(name__iexact=str(data.get('region') or '').strip())
     except (TypeError, ValueError, Region.DoesNotExist):
         errors['regionId'] = 'Select your region.'
     if errors:
