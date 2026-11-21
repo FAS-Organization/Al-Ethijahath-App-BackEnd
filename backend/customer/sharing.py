@@ -15,13 +15,26 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.exceptions import Throttled, ValidationError
 from rest_framework.response import Response
 
-from web.models import AuditEvent, CustomerApprover, CustomerCompany, ServiceAccess, SharingChallenge, User
+from web.models import (
+    AuditEvent,
+    CustomerApprover,
+    CustomerCompany,
+    ServiceAccess,
+    SharingChallenge,
+    User,
+)
 from .permissions import IsCustomer
 
 
 def audit(actor, action, obj, **changes):
-    AuditEvent.objects.create(actor=actor, action=action, model_label=obj._meta.label, record_id=str(obj.pk),
-                              changes=changes, source="api")
+    AuditEvent.objects.create(
+        actor=actor,
+        action=action,
+        model_label=obj._meta.label,
+        record_id=str(obj.pk),
+        changes=changes,
+        source="api",
+    )
 
 
 def value(field, data, key):
@@ -43,28 +56,40 @@ def start(request):
         if "service_user_id" in request.data:
             pk = value(serializers.IntegerField(min_value=1), request.data, "service_user_id")
             target = get_object_or_404(company.delegates, pk=pk)
-        last_hour = SharingChallenge.objects.filter(created_at__gte=now-timedelta(hours=1))
-        if last_hour.filter(company=company).count() >= 12 or last_hour.filter(email=email).count() >= 6:
+        last_hour = SharingChallenge.objects.filter(created_at__gte=now - timedelta(hours=1))
+        if (
+            last_hour.filter(company=company).count() >= 12
+            or last_hour.filter(email=email).count() >= 6
+        ):
             raise Throttled(wait=3600)
         older = SharingChallenge.objects.filter(company=company, email=email, target=target)
-        if older.filter(created_at__gt=now-timedelta(seconds=60)).exists():
+        if older.filter(created_at__gt=now - timedelta(seconds=60)).exists():
             raise Throttled(wait=60)
         older.filter(consumed_at=None).update(consumed_at=now)
-        row = SharingChallenge(company=company, email=email, target=target, created_by=request.user,
-                               expires_at=now+timedelta(minutes=10))
+        row = SharingChallenge(
+            company=company,
+            email=email,
+            target=target,
+            created_by=request.user,
+            expires_at=now + timedelta(minutes=10),
+        )
         code = f"{secrets.randbelow(10000):04d}"
         row.digest = digest(row, code)
         row.save()
     try:
-        sent = send_mail("Verify your Al Ethijahath service login",
+        sent = send_mail(
+            "Verify your Al Ethijahath service login",
             f"{company.name} wants to create or change a service-only login for this email. Give the account owner "
-            f"code {code} only if you agree. It expires in 10 minutes.", settings.DEFAULT_FROM_EMAIL, [email])
+            f"code {code} only if you agree. It expires in 10 minutes.",
+            settings.DEFAULT_FROM_EMAIL,
+            [email],
+        )
     except (SMTPException, OSError):
         sent = 0
     if not sent:
         SharingChallenge.objects.filter(pk=row.pk).update(consumed_at=timezone.now())
-        return Response({"message":"Email delivery failed. Request another code."}, status=503)
-    return Response({"challenge":row.nonce, "expires_at":row.expires_at}, status=201)
+        return Response({"message": "Email delivery failed. Request another code."}, status=503)
+    return Response({"challenge": row.nonce, "expires_at": row.expires_at}, status=201)
 
 
 @api_view(["POST"])
@@ -72,19 +97,26 @@ def start(request):
 @transaction.atomic
 def verify(request, nonce):
     code = value(serializers.RegexField(r"^[0-9]{4}$", max_length=4), request.data, "code")
-    row = get_object_or_404(SharingChallenge.objects.select_for_update(), company=request.user.customer_company,
-        nonce=nonce, created_by=request.user, consumed_at=None, attempts__lt=5, expires_at__gt=timezone.now())
+    row = get_object_or_404(
+        SharingChallenge.objects.select_for_update(),
+        company=request.user.customer_company,
+        nonce=nonce,
+        created_by=request.user,
+        consumed_at=None,
+        attempts__lt=5,
+        expires_at__gt=timezone.now(),
+    )
     if not constant_time_compare(row.digest, digest(row, code)):
         row.attempts += 1
         row.save(update_fields=["attempts"])
-        return Response({"message":"Incorrect code."}, status=400)
+        return Response({"message": "Incorrect code."}, status=400)
     row.verified_at = timezone.now()
     row.save(update_fields=["verified_at"])
-    return Response({"verified":True})
+    return Response({"verified": True})
 
 
 def public_grant(grant):
-    return {"id":grant.pk, "email":grant.user.email, "is_enabled":grant.is_enabled}
+    return {"id": grant.pk, "email": grant.user.email, "is_enabled": grant.is_enabled}
 
 
 def validated_password(request, user, name):
@@ -92,7 +124,7 @@ def validated_password(request, user, name):
     try:
         validate_password(pw, user)
     except ModelError as err:
-        raise ValidationError({name:err.messages}) from err
+        raise ValidationError({name: err.messages}) from err
     return pw
 
 
@@ -121,12 +153,21 @@ def service_users(request, pk=None):
         return Response(public_grant(grant))
     email = value(serializers.EmailField(), request.data, "email").lower()
     nonce = value(serializers.UUIDField(), request.data, "challenge")
-    proof = get_object_or_404(SharingChallenge.objects.select_for_update(), company=company, email=email,
-        created_by=request.user, nonce=nonce, target=grant, consumed_at=None, verified_at__isnull=False,
-        attempts__lt=5, expires_at__gt=timezone.now())
+    proof = get_object_or_404(
+        SharingChallenge.objects.select_for_update(),
+        company=company,
+        email=email,
+        created_by=request.user,
+        nonce=nonce,
+        target=grant,
+        consumed_at=None,
+        verified_at__isnull=False,
+        attempts__lt=5,
+        expires_at__gt=timezone.now(),
+    )
     user = grant.user if grant else User(is_active=True, account_status="active")
     if User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists():
-        raise ValidationError({"email":"This address already has a login."})
+        raise ValidationError({"email": "This address already has a login."})
     user.email = email
     user.set_password(validated_password(request, user, "password"))
     user.password_changed_at = timezone.now()
@@ -134,7 +175,7 @@ def service_users(request, pk=None):
         with transaction.atomic():
             user.save()
     except IntegrityError as err:
-        raise ValidationError({"email":"This address already has a login."}) from err
+        raise ValidationError({"email": "This address already has a login."}) from err
     if grant:
         grant.token_version += 1
         grant.save(update_fields=["token_version", "updated_at"])
@@ -149,7 +190,7 @@ def service_users(request, pk=None):
 class ApproverFields(serializers.ModelSerializer):
     class Meta:
         model = CustomerApprover
-        fields = ["id","name","email","designation","is_active"]
+        fields = ["id", "name", "email", "designation", "is_active"]
 
 
 @api_view(["GET", "POST", "PATCH"])
@@ -166,7 +207,7 @@ def approvers(request, pk=None):
     form = ApproverFields(obj, data=request.data, partial=bool(pk))
     form.is_valid(raise_exception=True)
     try:
-        saved = form.save(company=company, **({} if pk else {"created_by":request.user}))
+        saved = form.save(company=company, **({} if pk else {"created_by": request.user}))
     except IntegrityError as err:
         raise ValidationError("This email is already a signer for the company.") from err
     saved.deactivated_at = None if saved.is_active else (saved.deactivated_at or timezone.now())

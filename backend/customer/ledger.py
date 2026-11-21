@@ -1,3 +1,6 @@
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+from django.utils import timezone
 from django.core.exceptions import ValidationError as ModelError
 from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
@@ -16,7 +19,9 @@ def staff_region(user, permission, region_id):
         raise PermissionDenied()
     if not user.is_superuser:
         employee = getattr(user, "employee", None)
-        if not employee or not (employee.global_scope or (region_id is not None and employee.region_id == region_id)):
+        if not employee or not (
+            employee.global_scope or (region_id is not None and employee.region_id == region_id)
+        ):
             raise PermissionDenied()
 
 
@@ -29,14 +34,44 @@ class CreditFields(serializers.ModelSerializer):
 
 
 def invoice_ledger(invoice):
-    return {"id": invoice.pk, "number": invoice.number, "currency": invoice.currency,
-            "status": invoice.status, "issue_date": invoice.issue_date, "due_date": invoice.due_date,
-            "total": str(invoice.total), "amount_paid": str(invoice.amount_paid),
-            "amount_credited": str(invoice.amount_credited), "balance_due": str(invoice.balance_due),
-            "payment_status": invoice.payment_status, "is_overdue": invoice.is_overdue,
-            "credit_notes": CreditFields(invoice.credit_notes.all(), many=True).data,
-            "payments": [{"id": p.pk, "amount": str(p.amount), "paid_at": p.paid_at, "method": p.method,
-                          "transaction_reference": p.transaction_reference} for p in invoice.payments.filter(status="posted")]}
+    payments = [payment for payment in invoice.payments.all() if payment.status == "posted"]
+    credits = list(invoice.credit_notes.all())
+    zero = Decimal("0.00")
+    paid = sum((payment.amount for payment in payments), zero)
+    credited = sum((credit.amount for credit in credits), zero)
+    balance = invoice.total - paid - credited if invoice.status != "void" else zero
+    if invoice.status != "issued":
+        status = "not_payable"
+    elif balance <= zero:
+        status = "paid"
+    else:
+        status = "partially_paid" if paid else "unpaid"
+    today = timezone.localdate(timezone=ZoneInfo(invoice.region.timezone))
+    return {
+        "id": invoice.pk,
+        "number": invoice.number,
+        "currency": invoice.currency,
+        "status": invoice.status,
+        "issue_date": invoice.issue_date,
+        "due_date": invoice.due_date,
+        "total": str(invoice.total),
+        "amount_paid": str(paid),
+        "amount_credited": str(credited),
+        "balance_due": str(balance),
+        "payment_status": status,
+        "is_overdue": invoice.status == "issued" and balance > zero and invoice.due_date < today,
+        "credit_notes": CreditFields(credits, many=True).data,
+        "payments": [
+            {
+                "id": p.pk,
+                "amount": str(p.amount),
+                "paid_at": p.paid_at,
+                "method": p.method,
+                "transaction_reference": p.transaction_reference,
+            }
+            for p in payments
+        ],
+    }
 
 
 @api_view(["POST"])
@@ -50,7 +85,11 @@ def issue_credit_note(request, pk):
     values = form.validated_data
     existing = CreditNote.objects.filter(number=values["number"]).first()
     if existing:
-        if existing.invoice_id == invoice.pk and existing.amount == values["amount"] and existing.reason == values["reason"]:
+        if (
+            existing.invoice_id == invoice.pk
+            and existing.amount == values["amount"]
+            and existing.reason == values["reason"]
+        ):
             return Response(CreditFields(existing).data)
         raise ValidationError({"number": "This credit note number is already in use."})
     note = CreditNote(invoice=invoice, created_by=request.user, **values)
@@ -67,5 +106,15 @@ def issue_credit_note(request, pk):
 @api_view(["GET"])
 @permission_classes([IsCustomer])
 def ledger(request):
-    items = Invoice.objects.filter(company=request.user.customer_company).exclude(status="draft").select_related("region")
-    return Response({"company_name": request.user.customer_company.name, "invoices": [invoice_ledger(i) for i in items]})
+    items = (
+        Invoice.objects.filter(company=request.user.customer_company)
+        .exclude(status="draft")
+        .select_related("region")
+        .prefetch_related("payments", "credit_notes")
+    )
+    return Response(
+        {
+            "company_name": request.user.customer_company.name,
+            "invoices": [invoice_ledger(i) for i in items],
+        }
+    )

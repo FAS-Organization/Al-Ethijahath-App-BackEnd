@@ -25,6 +25,7 @@ class PortalAuthentication(JWTAuthentication):
 
 class StaffSessionAuthentication(SessionAuthentication):
     """Allow staff to use portal operations from their CSRF-protected admin session."""
+
     def authenticate(self, request):
         user = getattr(request._request, "user", None)
         if user and user.is_active and user.is_staff:

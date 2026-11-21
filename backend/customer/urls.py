@@ -1,6 +1,21 @@
 from django.urls import path
 
-from . import chat, dashboard, notices, pdf, decisions, documents, records, schedule, account, ledger, rentals, requests, sharing, views
+from . import (
+    chat,
+    dashboard,
+    notices,
+    pdf,
+    decisions,
+    documents,
+    records,
+    schedule,
+    account,
+    ledger,
+    rentals,
+    requests,
+    sharing,
+    views,
+)
 
 urlpatterns = [
     path("dashboard/", dashboard.dashboard),
@@ -11,12 +26,12 @@ urlpatterns = [
     path("notifications/read/", notices.notifications),
     path("files/<str:kind>/<int:pk>/", documents.download, name="portal-file"),
     path("documents/", documents.documents),
-    path("services/", records.collection, {"section":"services"}),
-    path("equipment/", records.collection, {"section":"equipment"}),
-    path("billing/", records.collection, {"section":"billing"}),
-    path("quotations/", records.collection, {"section":"quotations"}),
-    path("quotations/<int:pk>/decision/", decisions.quote_action, {"action":"decision"}),
-    path("quotations/<int:pk>/email/", decisions.quote_action, {"action":"email"}),
+    path("services/", records.collection, {"section": "services"}),
+    path("equipment/", records.collection, {"section": "equipment"}),
+    path("billing/", records.collection, {"section": "billing"}),
+    path("quotations/", records.collection, {"section": "quotations"}),
+    path("quotations/<int:pk>/decision/", decisions.quote_action, {"action": "decision"}),
+    path("quotations/<int:pk>/email/", decisions.quote_action, {"action": "email"}),
     path("maintenance/", schedule.schedule),
     path("appointments/<int:pk>/reschedule/", schedule.request_date),
     path("reschedules/<int:pk>/respond/", schedule.respond),
@@ -31,8 +46,8 @@ urlpatterns = [
     path("service-access/challenges/<uuid:nonce>/verify/", sharing.verify),
     path("service-requests/", requests.service_requests, name="service-requests"),
     path("rentals/", rentals.rentals),
-    path('billing/ledger/', ledger.ledger),
-    path('profile/', views.profile_view),
-    path('sites/', views.sites_view),
-    path('sites/<int:pk>/', views.site_detail_view),
+    path("billing/ledger/", ledger.ledger),
+    path("profile/", views.profile_view),
+    path("sites/", views.sites_view),
+    path("sites/<int:pk>/", views.site_detail_view),
 ]

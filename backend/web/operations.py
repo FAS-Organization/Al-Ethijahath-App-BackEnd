@@ -17,8 +17,11 @@ from .publication import publish
 
 
 def next_number(region, kind):
-    sequence, _ = m.DocumentNumberSequence.objects.get_or_create(region=region, document_type=kind,
-        defaults={"prefix": f"{region.code}-{'INV' if kind=='invoice' else 'QT'}-"})
+    sequence, _ = m.DocumentNumberSequence.objects.get_or_create(
+        region=region,
+        document_type=kind,
+        defaults={"prefix": f"{region.code}-{'INV' if kind=='invoice' else 'QT'}-"},
+    )
     sequence = m.DocumentNumberSequence.objects.select_for_update().get(pk=sequence.pk)
     model = m.Invoice if kind == "invoice" else m.Quotation
     while True:
@@ -51,12 +54,20 @@ def issue(request, kind, pk):
         except InvalidLine as exc:
             raise serializers.ValidationError(exc.messages) from exc
     record.subtotal = sum((line.line_total for line in lines), Decimal("0"))
-    for field in ("discount","tax_amount"):
+    for field in ("discount", "tax_amount"):
         if field in request.data:
-            amount = value(serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0")), request.data, field)
+            amount = value(
+                serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0")),
+                request.data,
+                field,
+            )
             setattr(record, field, amount)
     record.total = record.subtotal - record.discount + record.tax_amount
-    record.billing_snapshot = {"name": company.name, "address": company.billing_address, "tax_number": company.tax_number}
+    record.billing_snapshot = {
+        "name": company.name,
+        "address": company.billing_address,
+        "tax_number": company.tax_number,
+    }
     now = timezone.now()
     if kind == "quotation":
         record.expires_at = value(serializers.DateTimeField(), request.data, "expires_at")
@@ -77,7 +88,9 @@ def issue(request, kind, pk):
     checked(record)
     document = publish(request.user, kind, pk)
     audit(request.user, kind + ".issued", record, document=document.pk)
-    return Response({"id": record.pk, "number": record.number, "status": record.status, "document": document.pk})
+    return Response(
+        {"id": record.pk, "number": record.number, "status": record.status, "document": document.pk}
+    )
 
 
 class PaymentForm(serializers.Serializer):
@@ -85,7 +98,9 @@ class PaymentForm(serializers.Serializer):
     amount = serializers.DecimalField(max_digits=16, decimal_places=2, min_value=Decimal("0.01"))
     method = serializers.ChoiceField(choices=["cash", "bank_transfer", "qr", "other"])
     paid_at = serializers.DateTimeField()
-    transaction_reference = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    transaction_reference = serializers.CharField(
+        max_length=150, required=False, allow_blank=True, default=""
+    )
     corrects_id = serializers.IntegerField(min_value=1, required=False)
 
 
@@ -115,6 +130,7 @@ def record_payment(request, pk):
 @transaction.atomic
 def submit_report(request, kind, pk):
     from customer.decisions import REPORTS, require_assigned_technician
+
     if kind not in REPORTS:
         raise serializers.ValidationError("Choose an inspection or completion card.")
     model, _ = REPORTS[kind]
@@ -124,7 +140,8 @@ def submit_report(request, kind, pk):
         raise serializers.ValidationError("Only a draft customer report can be submitted.")
     report.status, report.submitted_at = "pending_approval", timezone.now()
     checked(report)
-    audit(request.user, kind+".submitted", report, version=report.version)
+    publish(request.user, kind, report.pk)
+    audit(request.user, kind + ".submitted", report, version=report.version)
     return Response({"id": report.pk, "status": report.status})
 
 
@@ -146,10 +163,12 @@ def void_entry(request, kind, pk):
         invoice = record
         staff_region(request.user, "web.change_invoice", invoice.region_id)
         if record.status != "issued" or record.amount_credited or record.amount_paid:
-            raise serializers.ValidationError("Only an issued invoice with no posted payments or credits can be voided.")
+            raise serializers.ValidationError(
+                "Only an issued invoice with no posted payments or credits can be voided."
+            )
     else:
         raise serializers.ValidationError("Choose an invoice or payment.")
     record.status, record.void_reason = "void", reason
     checked(record)
-    audit(request.user, kind+".voided", record, reason=reason)
+    audit(request.user, kind + ".voided", record, reason=reason)
     return Response({"id": pk, "status": record.status, "balance_due": str(invoice.balance_due)})

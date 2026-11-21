@@ -11,7 +11,10 @@ from .portal_admin import scoped
 
 FILES = {
     "pdf": (m.GeneratedDocument, {"file": "Versioned PDF"}),
-    "return": (m.EmailApprovalSubmission, {"signed_pdf": "Returned signed PDF", "email_evidence": "Original email"}),
+    "return": (
+        m.EmailApprovalSubmission,
+        {"signed_pdf": "Returned signed PDF", "email_evidence": "Original email"},
+    ),
     "approval": (m.DocumentApproval, {"evidence_file": "Approval evidence"}),
     "request": (m.ServiceJob, {"request_photo": "Service request photo"}),
 }
@@ -32,7 +35,9 @@ def download(request, kind, pk, field):
     if not handle:
         raise Http404
     try:
-        response = FileResponse(handle.open("rb"), as_attachment=True, filename=labels[field] + Path(handle.name).suffix)
+        response = FileResponse(
+            handle.open("rb"), as_attachment=True, filename=labels[field] + Path(handle.name).suffix
+        )
     except FileNotFoundError as exc:
         raise Http404 from exc
     response["Cache-Control"] = "private, no-store"

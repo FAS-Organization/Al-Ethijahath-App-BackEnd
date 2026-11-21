@@ -9,7 +9,7 @@ class ProfileSerializer(serializers.ModelSerializer):
             'name', 'registration_number', 'tax_number', 'billing_address',
             'contact_name', 'contact_email', 'contact_phone',
         ]
-        read_only_fields = ['contact_email']
+        read_only_fields = ["contact_email"]
 
 
 class SiteSerializer(serializers.ModelSerializer):
@@ -21,7 +21,13 @@ class SiteSerializer(serializers.ModelSerializer):
     class Meta:
         model = CustomerSite
         fields = [
-            'id', 'name', 'kind', 'address', 'region', 'region_name',
-            'contact_name', 'contact_phone',
+            "id",
+            "name",
+            "kind",
+            "address",
+            "region",
+            "region_name",
+            "contact_name",
+            "contact_phone",
         ]
         extra_kwargs = {'address': {'allow_blank': False, 'required': True}}

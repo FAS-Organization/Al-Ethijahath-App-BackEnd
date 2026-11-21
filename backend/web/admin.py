@@ -124,13 +124,18 @@ for model in [
     models.Quotation,
     models.QuotationLine,
     models.EmailApprovalSubmission,
-    models.RentalItem, models.RentalOrder, models.RentalOrderLine,
-    models.PendingServiceCharge, models.QuoteEmailRequest, models.AMCMonthlySummary,
+    models.RentalItem,
+    models.RentalOrder,
+    models.RentalOrderLine,
+    models.PendingServiceCharge,
+    models.QuoteEmailRequest,
+    models.AMCMonthlySummary,
 ]:
     admin.site.register(model, ADMIN_CLASSES.get(model, ScopedAdmin))
 
 admin.site.unregister(Group)
 admin.site.register(Group, GroupAdmin)
+
 
 # Audit records should be view-only in admin.
 @admin.register(models.AuditEvent)
@@ -165,6 +170,7 @@ class AuditEventAdmin(ScopedAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+
 class CustomerCompanyForm(forms.ModelForm):
     account_status = forms.ChoiceField(
         choices=User.Status.choices,
@@ -192,11 +198,18 @@ admin.site.unregister(CustomerCompany)
 @admin.register(CustomerCompany)
 class CustomerCompanyAdmin(ScopedAdmin):
     def get_readonly_fields(self, request, obj=None):
-        return [*super().get_readonly_fields(request, obj), *(["account_holder","region"] if obj and obj.region_id else ["account_holder"] if obj else [])]
+        return [
+            *super().get_readonly_fields(request, obj),
+            *(
+                ["account_holder", "region"]
+                if obj and obj.region_id
+                else ["account_holder"] if obj else []
+            ),
+        ]
 
     form = CustomerCompanyForm
     list_display = ('name', 'contact_name', 'contact_email', 'contact_phone', 'regions', 'status', 'created_at')
-    list_filter = ('account_holder__account_status', 'region', 'is_active')
+    list_filter = ("account_holder__account_status", "region", "is_active")
     search_fields = ('name', 'contact_name', 'contact_email', 'account_holder__email')
     ordering = ('-created_at',)
     list_select_related = ('account_holder',)
@@ -204,10 +217,10 @@ class CustomerCompanyAdmin(ScopedAdmin):
     @admin.display(description='Account status', ordering='account_holder__account_status')
     def status(self, obj):
         return obj.account_holder.get_account_status_display()
-        
+
     @admin.display(description='Region')
     def regions(self, obj):
-        return obj.region.name if obj.region_id else 'Needs regional review'
+        return obj.region.name if obj.region_id else "Needs regional review"
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related('sites__region')
@@ -242,10 +255,14 @@ class CustomerCompanyAdmin(ScopedAdmin):
             return
         transaction.on_commit(
             lambda: send_mail(
-                subject, body, settings.DEFAULT_FROM_EMAIL, [user.email],
+                subject,
+                body,
+                settings.DEFAULT_FROM_EMAIL,
+                [user.email],
                 fail_silently=True,
             )
         )
+
 
 @admin.register(models.CreditNote)
 class CreditNoteAdmin(ScopedAdmin):

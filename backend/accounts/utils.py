@@ -31,8 +31,8 @@ def api_exception_handler(exc, context):
 
 
 def get_role(user):
-    if hasattr(user, 'service_access'):
-        return 'service_requester'
+    if hasattr(user, "service_access"):
+        return "service_requester"
     if hasattr(user, 'customer_company'):
         return 'customer'
     if user.is_superuser:
