@@ -14,7 +14,7 @@ class Migration(migrations.Migration):
         ("upcoming_service", "Upcoming service"),
         ("service_completed", "Service completed"),
         ("invoice_issued", "Invoice issued"),
-        ("payment_overdue", "Overdue invoice"),
+        ("payment_overdue", "Payment overdue"),
         ("payment_recorded", "Payment recorded"),
         ("credit_issued", "Credit note issued"),
         ("amc_summary", "AMC monthly summary"),

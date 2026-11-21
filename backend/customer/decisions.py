@@ -171,6 +171,9 @@ def tablet(request,kind,pk):
             raise ValidationError("Signature images must be 5 MB or smaller.")
     company=m.job.company
     signer=get_object_or_404(company.authorized_approvers,pk=v["approver_id"],is_active=True) if "approver_id" in v else None
+    expected_name=signer.name if signer else company.contact_name
+    if " ".join(v["signer_name"].split()).casefold() != " ".join(expected_name.split()).casefold():
+        raise ValidationError({"signer_name":"Choose the account holder or a current authorized signer for this company."})
     common={field:report,"decision":"approved","approved_at":timezone.now(),"created_by":request.user,"method":"on_site"}
     if not report.approvals.filter(signer_role="technician",signing_user=request.user,decision="approved").exists():
         if not v.get("technician_signature"):

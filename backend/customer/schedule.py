@@ -56,9 +56,9 @@ def schedule(request):
         "appointments":appointments,"reschedule_requests":requests,"monthly_summaries":monthly,
         "related_services":[{**fields(m,"equipment_id","reference","status","completed_at","started_at"),"site_id":m.job.site_id,
             "date":m.completed_at or m.started_at or m.created_at,"job_type":m.job.job_type,"is_amc":bool(m.amc_coverage_id)} for m in machines.select_related("job")],
-        "invoices":[{"id":i.pk,"date":i.issue_date,"total":float(i.total-i.amount_credited),"invoiced":str(i.total),
-            "credited":str(i.amount_credited),"paid":float(i.amount_paid),"currency":i.currency} for i in c.invoices.filter(status="issued")],
-        "quotations":[{"id":q["id"],"date":q["sent_at"],"status":"pending" if q["status"]=="sent" else q["status"],"currency":q["currency"],"amount":float(q["total"])}
+        "invoices":[{"id":i.pk,"date":i.issue_date,"total":str(i.total),"invoiced":str(i.total),"outstanding":str(i.balance_due),
+            "credited":str(i.amount_credited),"paid":str(i.amount_paid),"currency":i.currency} for i in c.invoices.filter(status="issued")],
+        "quotations":[{"id":q["id"],"date":q["sent_at"],"status":"pending" if q["status"]=="sent" else q["status"],"currency":q["currency"],"amount":q["total"]}
                       for q in quotes_for(c) if q["status"]!="superseded"],
         "inspections":[{"id":i["id"],"date":i["inspected_at"],"status":"completed" if i["status"]=="approved" else "pending"}
                        for i in inspections_for(c) if i["status"]!="superseded"],

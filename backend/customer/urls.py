@@ -1,8 +1,10 @@
 from django.urls import path
 
-from . import notices, pdf, decisions, documents, records, schedule, account, ledger, rentals, requests, sharing, views
+from . import chat, dashboard, notices, pdf, decisions, documents, records, schedule, account, ledger, rentals, requests, sharing, views
 
 urlpatterns = [
+    path("dashboard/", dashboard.dashboard),
+    path("chat/", chat.ask),
     path("billing/statement/", pdf.statement),
     path("notifications/", notices.notifications),
     path("notifications/<int:pk>/read/", notices.notifications),

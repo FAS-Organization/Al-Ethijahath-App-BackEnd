@@ -108,7 +108,7 @@ def monthly():
 
 def send_quote(pk):
     with transaction.atomic():
-        row=QuoteEmailRequest.objects.select_for_update().select_related("document__quotation__job_equipment__job__company__account_holder").get(pk=pk)
+        row=QuoteEmailRequest.objects.select_for_update(of=("self",)).select_related("document__quotation__job_equipment__job__company__account_holder").get(pk=pk)
         if row.sent_at or row.cancelled_at or row.attempts>=5 or (row.last_attempt_at and row.last_attempt_at>timezone.now()-timedelta(minutes=5)):
             return
         q=row.document.quotation
