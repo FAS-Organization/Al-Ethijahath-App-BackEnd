@@ -1,8 +1,12 @@
 from django.urls import path
 
-from . import decisions, documents, records, schedule, account, ledger, rentals, requests, sharing, views
+from . import notices, pdf, decisions, documents, records, schedule, account, ledger, rentals, requests, sharing, views
 
 urlpatterns = [
+    path("billing/statement/", pdf.statement),
+    path("notifications/", notices.notifications),
+    path("notifications/<int:pk>/read/", notices.notifications),
+    path("notifications/read/", notices.notifications),
     path("files/<str:kind>/<int:pk>/", documents.download, name="portal-file"),
     path("documents/", documents.documents),
     path("services/", records.collection, {"section":"services"}),

@@ -1584,6 +1584,8 @@ class Notification(Record):
         INVOICE_ISSUED = "invoice_issued", "Invoice issued"
         PAYMENT_OVERDUE = "payment_overdue", "Payment overdue"
         PAYMENT_RECORDED = "payment_recorded", "Payment recorded"
+        CREDIT_ISSUED = "credit_issued", "Credit note issued"
+        AMC_SUMMARY = "amc_summary", "AMC monthly summary"
         RESCHEDULE_DECISION = "reschedule_decision", "Reschedule decision"
 
     recipient = models.ForeignKey(
