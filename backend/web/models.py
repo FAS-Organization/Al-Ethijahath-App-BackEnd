@@ -56,7 +56,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager as DjangoUserManager
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.db.models import F, Q, Sum
 from django.db.models.functions import Lower
 from django.utils import timezone
@@ -1125,15 +1125,23 @@ class Invoice(Record):
         )
 
     @property
+    def amount_credited(self):
+        if not self.pk:
+            return ZERO
+        return self.credit_notes.aggregate(total=Sum("amount"))["total"] or ZERO
+
+    @property
     def balance_due(self):
-        return self.total - self.amount_paid
+        if self.status == self.Status.VOID:
+            return ZERO
+        return self.total - self.amount_paid - self.amount_credited
 
     @property
     def payment_status(self):
         if self.status != self.Status.ISSUED:
             return "not_payable"
         paid = self.amount_paid
-        if paid >= self.total:
+        if paid + self.amount_credited >= self.total:
             return "paid"
         return "partially_paid" if paid > ZERO else "unpaid"
 
@@ -1309,6 +1317,62 @@ class Payment(Record):
             )
         # Posting service must lock invoice, reject overpayment and non-issued
         # invoices, and reuse request idempotency_key for retries.
+
+
+    def save(self, *args, **kwargs):
+        with transaction.atomic():
+            invoice = Invoice.objects.select_for_update().get(pk=self.invoice_id)
+            other_payments = invoice.payments.filter(status=self.Status.POSTED).exclude(pk=self.pk)
+            paid = other_payments.aggregate(total=Sum("amount"))["total"] or ZERO
+            if self.status == self.Status.POSTED:
+                if invoice.status != Invoice.Status.ISSUED or self.amount > invoice.total - paid - invoice.amount_credited:
+                    raise ValidationError({"amount": "Payment exceeds the issued invoice's remaining balance."})
+            if self.pk and Payment.objects.filter(pk=self.pk).exclude(invoice=invoice).exists():
+                raise ValidationError("A payment cannot be moved to another invoice.")
+            return super().save(*args, **kwargs)
+
+
+class CreditNote(Record):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="credit_notes")
+    number = models.CharField(max_length=80, unique=True)
+    amount = models.DecimalField(max_digits=16, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))])
+    reason = models.CharField(max_length=500)
+    issued_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        ordering = ["issued_at", "pk"]
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="credit_note_positive_amount"),
+            models.CheckConstraint(condition=~Q(reason="") & ~Q(number=""), name="credit_note_identified"),
+        ]
+
+    def clean(self):
+        if not self.reason.strip():
+            raise ValidationError({"reason": "Explain the credit."})
+        if self.invoice_id and self._state.adding:
+            if self.invoice.status != Invoice.Status.ISSUED:
+                raise ValidationError({"invoice": "Only issued invoices may be credited."})
+            if self.amount is not None and self.amount > self.invoice.balance_due:
+                raise ValidationError({"amount": "The credit exceeds the remaining balance."})
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("An issued credit note cannot be edited.")
+        with transaction.atomic():
+            self.invoice = Invoice.objects.select_for_update().get(pk=self.invoice_id)
+            self.full_clean()
+            result = super().save(*args, **kwargs)
+            AuditEvent.objects.create(actor=self.created_by, action="credit_note.issued", model_label=self._meta.label,
+                record_id=str(self.pk), source="api" if getattr(self, "_from_api", False) else "admin",
+                changes={"invoice": self.invoice_id, "number": self.number, "amount": str(self.amount),
+                         "currency": self.invoice.currency}, reason=self.reason)
+            return result
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("An issued credit note cannot be deleted.")
+
+    def __str__(self):
+        return self.number
 
 
 class DocumentTemplate(Record):

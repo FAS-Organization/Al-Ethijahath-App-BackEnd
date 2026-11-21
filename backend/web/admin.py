@@ -236,3 +236,35 @@ class CustomerCompanyAdmin(admin.ModelAdmin):
                 fail_silently=True,
             )
         )
+
+@admin.register(models.CreditNote)
+class CreditNoteAdmin(admin.ModelAdmin):
+    list_display = ("number", "invoice", "amount", "issued_at", "created_by")
+    fields = ("invoice", "number", "amount", "reason")
+    search_fields = ("number", "invoice__number", "invoice__company__name")
+
+    def get_queryset(self, request):
+        rows = super().get_queryset(request).select_related("invoice", "created_by")
+        employee = getattr(request.user, "employee", None)
+        if request.user.is_superuser or (employee and employee.global_scope):
+            return rows
+        return rows.filter(invoice__region_id=employee.region_id) if employee else rows.none()
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "invoice":
+            rows = models.Invoice.objects.filter(status="issued")
+            employee = getattr(request.user, "employee", None)
+            if not request.user.is_superuser and not (employee and employee.global_scope):
+                rows = rows.filter(region_id=employee.region_id) if employee else rows.none()
+            kwargs["queryset"] = rows
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        obj.created_by = request.user
+        super().save_model(request, obj, form, change)
