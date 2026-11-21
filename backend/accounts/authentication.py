@@ -1,3 +1,4 @@
+from rest_framework.authentication import SessionAuthentication
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
@@ -20,3 +21,12 @@ class PortalAuthentication(JWTAuthentication):
             if grant and request.resolver_match.url_name not in {"account-me", "service-requests"}:
                 raise PermissionDenied("This login may only request service.")
         return result
+
+
+class StaffSessionAuthentication(SessionAuthentication):
+    """Allow staff to use portal operations from their CSRF-protected admin session."""
+    def authenticate(self, request):
+        user = getattr(request._request, "user", None)
+        if user and user.is_active and user.is_staff:
+            return super().authenticate(request)
+        return None

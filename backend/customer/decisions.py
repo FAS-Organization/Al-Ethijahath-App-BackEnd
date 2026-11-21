@@ -19,9 +19,9 @@ from .sharing import audit, value
 def checked(obj):
     try:
         obj.full_clean()
+        obj.save()
     except ModelError as exc:
         raise ValidationError(getattr(exc,"message_dict",exc.messages)) from exc
-    obj.save()
     return obj
 
 
@@ -157,12 +157,8 @@ def finalize(actor,kind,report):
 @transaction.atomic
 def tablet(request,kind,pk):
     report,field=pending_report(kind,pk)
+    require_assigned_technician(request.user,report)
     m=report.job_equipment
-    staff_region(request.user,"web.change_"+report._meta.model_name,m.job.region_id)
-    if report.technician.user_id!=request.user.pk or (report.assignment_id and (
-            report.assignment.status!="accepted" or report.assignment.technician_id!=report.technician_id)) or (
-            not report.assignment_id and m.assigned_technician_id!=report.technician_id):
-        raise PermissionDenied("Only the technician assigned to this report can record the on-site approval.")
     form=Signatures(data=request.data)
     form.is_valid(raise_exception=True)
     v=form.validated_data
@@ -203,7 +199,7 @@ def verify_return(request,pk):
     if row.status!="pending" or (row.customer_approver_id and not row.customer_approver.is_active):
         raise ValidationError("The return or signer's authority is no longer current.")
     signer_email=row.customer_approver.email if row.customer_approver_id else row.signing_user.email
-    if row.signer_email.lower()!=signer_email.lower():
+    if row.signer_email.casefold()!=signer_email.casefold() or row.sender_email.casefold()!=signer_email.casefold():
         raise ValidationError("Check the signer's address against the registered authority.")
     if not report.approvals.filter(signer_role="technician",decision="approved",signing_user=report.technician.user).exists():
         raise ValidationError("Record the technician's signature on this exact report version first.")
@@ -223,3 +219,34 @@ def verify_return(request,pk):
         signing_user=row.signing_user,customer_approver=row.customer_approver,signer_name=row.signer_name,signer_email=row.signer_email,
         created_by=request.user,authority_basis="Sales verified the returned signed PDF",authority_snapshot={"version":report.version,"sender":row.sender_email}))
     return finalize(request.user,kind,report)
+
+
+def require_assigned_technician(user, report):
+    machine = report.job_equipment
+    staff_region(user, "web.change_" + report._meta.model_name, machine.job.region_id)
+    assigned = machine.assigned_technician_id == report.technician_id
+    if report.assignment_id:
+        assigned = report.assignment.status == "accepted" and report.assignment.technician_id == report.technician_id
+    if user.pk != report.technician.user_id or not assigned:
+        raise PermissionDenied("The assigned technician must record this signature.")
+
+
+@api_view(["POST"])
+@permission_classes([IsAdminUser])
+@transaction.atomic
+def technician_signature(request, kind, pk):
+    report, field = pending_report(kind, pk)
+    require_assigned_technician(request.user, report)
+    existing = report.approvals.filter(signer_role="technician", signing_user=request.user, decision="approved").first()
+    if existing:
+        return Response({"id": existing.pk, "version": report.version})
+    file = value(serializers.ImageField(), request.data, "technician_signature")
+    if file.size > 5 * 1024 * 1024:
+        raise ValidationError({"technician_signature": "Choose a signature image up to 5 MB."})
+    event = checked(DocumentApproval(
+        **{field: report}, method="on_site", decision="approved", signer_role="technician",
+        signer_name=request.user.get_full_name() or request.user.email, signer_email=request.user.email,
+        signing_user=request.user, created_by=request.user, authority_basis="Assigned technician",
+        evidence_file=file, approved_at=timezone.now(),
+    ))
+    return Response({"id": event.pk, "version": report.version}, status=201)

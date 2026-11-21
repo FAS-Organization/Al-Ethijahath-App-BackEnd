@@ -31,11 +31,14 @@ def publish(actor,kind,pk):
     if not actor.is_superuser and actor.groups.filter(name="Technician").exists():
         if kind not in ("completion","inspection") or source.technician.user_id!=actor.pk:
             raise PermissionDenied()
-    valid={"inspection":{"pending_approval","approved"},"completion":{"approved"},"quotation":{"sent","approved","rejected","expired"},
+    valid={"inspection":{"pending_approval","approved"},"completion":{"pending_approval","approved"},"quotation":{"sent","approved","rejected","expired"},
            "invoice":{"issued","void"}}
     if source.status not in valid[kind] or getattr(source,"purpose","customer")!="customer":
         raise ValidationError("This version is not available for customer publication.")
-    existing=source.pdfs.filter(status="ready",visibility="customer",data_snapshot__source_status=source.status).order_by("-pk").first()
+    visibility="internal" if kind=="completion" and source.status=="pending_approval" else "customer"
+    signature_ids = list(source.approvals.filter(decision="approved").order_by("pk").values_list("pk", flat=True)) if kind in ("inspection","completion") else []
+    existing=source.pdfs.filter(status="ready",visibility=visibility,data_snapshot__source_status=source.status,
+                               data_snapshot__signature_ids=signature_ids).order_by("-pk").first()
     if existing:
         return existing
     template=DocumentTemplate.objects.filter(is_active=True,document_type=kind).first()
@@ -68,9 +71,9 @@ def publish(actor,kind,pk):
         paragraphs += [source.work_summary,source.final_condition,source.out_of_scope_notes]
         rows=[["Component","Work performed","Action","Quantity"]]+[
             [a.component,a.work_performed,a.action_taken,str(a.quantity_used)] for a in source.work_items.order_by("pk")]
-    if kind in ("inspection","completion") and source.status=="approved":
+    if kind in ("inspection","completion"):
         signs=list(source.approvals.filter(decision="approved").select_related("email_submission"))
-        if {e.signer_role for e in signs}!={"technician","customer"}:
+        if source.status=="approved" and {e.signer_role for e in signs}!={"technician","customer"}:
             raise ValidationError("Both signatures for this version are required.")
         for e in signs:
             if e.method=="email_attachment" and e.email_submission_id:
@@ -87,8 +90,8 @@ def publish(actor,kind,pk):
     else:
         data=render_pdf(title,paragraphs,rows,signatures)
     now=timezone.now()
-    result=GeneratedDocument(**{field:source},document_number=number,template=template,created_by=actor,visibility="customer",status="ready",
-        data_snapshot={"source_status":source.status,"source_id":pk,"version":getattr(source,"version",1),"paragraphs":paragraphs,"rows":rows},
+    result=GeneratedDocument(**{field:source},document_number=number,template=template,created_by=actor,visibility=visibility,status="ready",
+        data_snapshot={"source_status":source.status,"signature_ids":signature_ids,"source_id":pk,"version":getattr(source,"version",1),"paragraphs":paragraphs,"rows":rows},
         generated_at=now,published_at=now,sha256=hashlib.sha256(data).hexdigest())
     result.full_clean()
     result.file.save("document.pdf",ContentFile(data),save=False)

@@ -9,6 +9,7 @@ from django.db import transaction
 from .models import CustomerCompany, User
 
 from . import models
+from .portal_admin import ADMIN_CLASSES, ScopedAdmin, SuperuserManagement, Group, GroupAdmin
 
 # Custom user forms: our User uses email instead of username.
 class CustomUserCreationForm(UserCreationForm):
@@ -24,7 +25,7 @@ class CustomUserChangeForm(UserChangeForm):
 
 
 @admin.register(models.User)
-class CustomUserAdmin(UserAdmin):
+class CustomUserAdmin(SuperuserManagement, UserAdmin):
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     model = models.User
@@ -87,7 +88,7 @@ class CustomUserAdmin(UserAdmin):
 
 
 # Basic registration for initial local development.
-admin.site.register([
+for model in [
     models.Region,
     models.EmployeeProfile,
     models.CustomerCompany,
@@ -123,11 +124,17 @@ admin.site.register([
     models.Quotation,
     models.QuotationLine,
     models.EmailApprovalSubmission,
-])
+    models.RentalItem, models.RentalOrder, models.RentalOrderLine,
+    models.PendingServiceCharge, models.QuoteEmailRequest, models.AMCMonthlySummary,
+]:
+    admin.site.register(model, ADMIN_CLASSES.get(model, ScopedAdmin))
+
+admin.site.unregister(Group)
+admin.site.register(Group, GroupAdmin)
 
 # Audit records should be view-only in admin.
 @admin.register(models.AuditEvent)
-class AuditEventAdmin(admin.ModelAdmin):
+class AuditEventAdmin(ScopedAdmin):
     list_display = (
         "occurred_at",
         "actor",
@@ -183,10 +190,13 @@ admin.site.unregister(CustomerCompany)
 
 
 @admin.register(CustomerCompany)
-class CustomerCompanyAdmin(admin.ModelAdmin):
+class CustomerCompanyAdmin(ScopedAdmin):
+    def get_readonly_fields(self, request, obj=None):
+        return [*super().get_readonly_fields(request, obj), *(["account_holder","region"] if obj and obj.region_id else ["account_holder"] if obj else [])]
+
     form = CustomerCompanyForm
     list_display = ('name', 'contact_name', 'contact_email', 'contact_phone', 'regions', 'status', 'created_at')
-    list_filter = ('account_holder__account_status', 'sites__region', 'is_active')
+    list_filter = ('account_holder__account_status', 'region', 'is_active')
     search_fields = ('name', 'contact_name', 'contact_email', 'account_holder__email')
     ordering = ('-created_at',)
     list_select_related = ('account_holder',)
@@ -197,7 +207,7 @@ class CustomerCompanyAdmin(admin.ModelAdmin):
         
     @admin.display(description='Region')
     def regions(self, obj):
-        return ', '.join(sorted({s.region.name for s in obj.sites.all()})) or '-'
+        return obj.region.name if obj.region_id else 'Needs regional review'
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related('sites__region')
@@ -238,7 +248,7 @@ class CustomerCompanyAdmin(admin.ModelAdmin):
         )
 
 @admin.register(models.CreditNote)
-class CreditNoteAdmin(admin.ModelAdmin):
+class CreditNoteAdmin(ScopedAdmin):
     list_display = ("number", "invoice", "amount", "issued_at", "created_by")
     fields = ("invoice", "number", "amount", "reason")
     search_fields = ("number", "invoice__number", "invoice__company__name")

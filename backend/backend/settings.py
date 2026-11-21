@@ -129,6 +129,7 @@ AUTH_USER_MODEL = 'web.User'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'accounts.authentication.PortalAuthentication',
+        'accounts.authentication.StaffSessionAuthentication',
     ),
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
