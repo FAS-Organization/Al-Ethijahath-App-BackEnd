@@ -148,6 +148,16 @@ class Signatures(serializers.Serializer):
 def finalize(actor,kind,report):
     report.status,report.finalized_at="approved",timezone.now()
     checked(report)
+    if kind=="completion":
+        from web.models import ServiceJob
+        machine=JobEquipment.objects.select_for_update().get(pk=report.job_equipment_id)
+        job=ServiceJob.objects.select_for_update().get(pk=machine.job_id)
+        if job.status!="cancelled" and machine.status!="cancelled":
+            machine.status,machine.completed_at="completed",report.completed_at
+            machine.save(update_fields=["status","completed_at","updated_at"])
+            if not job.machines.exclude(status__in=["completed","cancelled"]).exists() and job.status!="closed":
+                job.status="completed"
+                job.save(update_fields=["status","updated_at"])
     audit(actor,kind+".approved",report,version=report.version)
     return Response({"id":report.pk,"version":report.version,"status":report.status})
 

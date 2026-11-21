@@ -303,3 +303,76 @@ class PortalTests(APITestCase):
         browser.force_login(self.staff)
         self.assertEqual(browser.post(action,{"number":"CN-admin","reason":"Rate correction","amount":"9.00"}).status_code,302)
         self.assertEqual(invoice.balance_due,Decimal("91.00"))
+
+    def test_credit_against_draft_and_void_and_original_total(self):
+        invoice=self.invoice()
+        self.client.force_authenticate(self.staff)
+        endpoint=S+f"invoices/{invoice.pk}/credit-notes/"
+        self.post(endpoint,{"number":"CN-01","amount":"25.00","reason":"Incorrect rate"},201)
+        invoice.total=Decimal("75.00")
+        with self.assertRaises(ValidationError):
+            invoice.save()
+        invoice.refresh_from_db()
+        self.assertEqual(invoice.total,Decimal("100.00"))
+        for status in ("draft","void"):
+            other=m.Invoice.objects.create(company=self.co,job=self.job(),region=self.r,currency="SAR",
+                status=status,issue_date=timezone.localdate(),due_date=timezone.localdate(),subtotal=50,total=50)
+            self.post(S+f"invoices/{other.pk}/credit-notes/",{"number":"CN-02","amount":"5","reason":"Correction"},400)
+
+    def test_dispatch_protects_assignments_and_internal_updates(self):
+        from django.contrib.auth.models import Group, Permission
+        group,_=Group.objects.get_or_create(name="Technician")
+        technician=m.User.objects.create_user("tech@example.com","tech-test-only",is_staff=True,is_active=True,account_status="active")
+        technician.groups.add(group)
+        technician.user_permissions.add(*Permission.objects.filter(content_type__app_label="web",codename__in=["respond_to_assignment","add_serviceupdate"]))
+        employee=m.EmployeeProfile.objects.create(user=technician,region=self.r,employee_id="TECH-1",job_title="Technician")
+        machine=m.JobEquipment.objects.create(job=self.job(),equipment=self.e,suffix="A")
+        self.client.force_authenticate(self.staff)
+        assign=self.post(S+f"services/{machine.pk}/assign/",{"technician_id":employee.pk,"purpose":"inspection"},201)
+        self.post(S+f"assignments/{assign['id']}/respond/",{"status":"accepted"},403)
+        self.client.force_authenticate(technician)
+        self.post(S+f"assignments/{assign['id']}/respond/",{"status":"accepted"})
+        for visibility,note in [("internal","Internal supplier amount"),("customer","Inspection scheduled")]:
+            self.post(S+f"services/{machine.pk}/progress/",{"status":"inspection","visibility":visibility,"message":note},201)
+        self.client.force_authenticate(self.owner)
+        visible=self.client.get(C+"services/").data["jobs"][0]["machines"][0]["updates"]
+        self.assertEqual([row["message"] for row in visible],["Inspection scheduled"])
+
+    def test_monthly_summaries_backfill_missed_months_only_once(self):
+        from datetime import date
+        today=timezone.localdate()
+        this_month=today.replace(day=1)
+        last=(this_month-timedelta(days=1)).replace(day=1)
+        first=(last-timedelta(days=1)).replace(day=1)
+        contract=m.AMCContract.objects.create(company=self.co,start_date=first,end_date=this_month+timedelta(days=20),
+                  contract_number="AMC-9",status="active",service_interval_months=1)
+        coverage=m.AMCEquipmentCoverage.objects.create(contract=contract,equipment=self.e,internal_reference="C-001",
+                                                       start_date=first,end_date=contract.end_date)
+        machine,tech=self.machine_and_technician()
+        machine.amc_coverage=coverage
+        machine.save()
+        time=timezone.now().replace(year=first.year,month=first.month,day=7,hour=8)
+        m.ServiceAppointment.objects.create(job_equipment=machine,technician=tech,purpose="maintenance",status="completed",
+            scheduled_start=time,scheduled_end=time+timedelta(hours=1),actual_end=time+timedelta(hours=1))
+        for _ in range(2):
+            call_command("process_portal")
+        self.assertEqual(contract.monthly_summaries.count(),2)
+        self.assertEqual(len(contract.monthly_summaries.get(month_start=first).visits),1)
+        self.assertEqual(len(contract.monthly_summaries.get(month_start=last).visits),0)
+        self.assertEqual(self.co.account_holder.notifications.filter(event_type="amc_summary").count(),2)
+        doc=contract.monthly_summaries.get(month_start=first)
+        self.client.force_authenticate(self.other)
+        self.assertEqual(self.client.get(C+f"files/monthly/{doc.pk}/").status_code,404)
+
+    def test_approval_portal_requires_po_and_current_version(self):
+        report=self.report()
+        self.signed(report)
+        quote=self.quote(report)
+        self.client.force_authenticate(self.other)
+        self.post(C+f"quotations/{quote.pk}/decision/",{"version":1,"decision":"approved"},404)
+        self.client.force_authenticate(self.owner)
+        def po():
+            return SimpleUploadedFile("purchase-order.pdf",b"%PDF-1.4 approved order","application/pdf")
+        self.post(C+f"quotations/{quote.pk}/decision/",{"version":2,"decision":"approved","purchase_order":po()},400,"multipart")
+        self.post(C+f"quotations/{quote.pk}/decision/",{"version":1,"decision":"approved","purchase_order":po()},200,"multipart")
+        self.assertTrue(quote.approvals.get().evidence_file)

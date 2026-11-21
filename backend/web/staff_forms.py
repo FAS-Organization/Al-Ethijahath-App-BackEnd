@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from customer import decisions, ledger, rentals, schedule
 from . import models as m
-from . import operations, publication
+from . import dispatch, operations, publication
 from .portal_admin import scoped
 from .staff_files import link
 
@@ -79,7 +79,30 @@ class VisitReview(forms.Form):
     notes = forms.CharField(required=False, widget=forms.Textarea)
 
 
+class Dispatch(forms.Form):
+    technician_id = forms.IntegerField(label="Regional technician ID")
+    purpose = forms.ChoiceField(choices=m.JobAssignment.Purpose.choices)
+    instructions = forms.CharField(widget=forms.Textarea,required=False)
+    reason = forms.CharField(required=False,label="Reason for reassignment")
+
+
+class AnswerAssignment(forms.Form):
+    status = forms.ChoiceField(choices=[("accepted","Accept"),("declined","Decline")])
+    reason = forms.CharField(required=False,label="Reason if declined")
+
+
+class Progress(forms.Form):
+    status = forms.ChoiceField(choices=[(k,v) for k,v in m.JobEquipment.Status.choices if k in
+        ("inspection","quotation","awaiting_approval","scheduled","awaiting_parts","in_progress","on_hold")])
+    message = forms.CharField(widget=forms.Textarea)
+    visibility = forms.ChoiceField(choices=m.Visibility.choices)
+    estimated_completion = forms.DateTimeField(required=False)
+
+
 TASKS = {
+    "assign": (m.JobEquipment,"assign_technician","Assign technician",Dispatch,dispatch.assign,{}),
+    "assignment-respond": (m.JobAssignment,"respond_to_assignment","Respond to assignment",AnswerAssignment,dispatch.respond,{}),
+    "service-progress": (m.JobEquipment,"add_serviceupdate","Record service progress",Progress,dispatch.progress,{}),
     "invoice-credit": (m.Invoice, "add_creditnote","Issue a credit note", Credit, ledger.issue_credit_note, {}),
     "invoice-pay": (m.Invoice, "add_payment","Record payment", Pay, operations.record_payment, {}),
     "invoice-void": (m.Invoice, "change_invoice","Void invoice", Reason, operations.void_entry, {"kind":"invoice"}),
@@ -112,7 +135,7 @@ def workflow(request, task, pk):
         raise PermissionDenied()
     obj = get_object_or_404(scoped(model.objects.all(),request.user),pk=pk)
     initial = {"version":getattr(obj,"version",None)}
-    form = form_class(request.POST if request.method=="POST" else None, request.FILES, initial=initial)
+    form = form_class(request.POST if request.method=="POST" else None, request.FILES if request.method=="POST" else None, initial=initial)
     if request.method == "POST" and form.is_valid():
         # Use the same authenticated, transactional handler as the tablet/API.
         # Django forms send blank optional fields. DRF should see them as omitted.

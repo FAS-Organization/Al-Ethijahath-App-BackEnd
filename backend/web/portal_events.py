@@ -52,3 +52,18 @@ def rescheduled(sender,instance,raw=False,**kwargs):
         notify(v.job_equipment.job.company,"reschedule_decision",
                f"reschedule:{instance.pk}:{instance.status}:{instance.alternative_date}:{v.schedule_version}","Visit request updated",
                f"Your date change for {v.job_equipment.reference} is {instance.get_status_display().lower()}.","/maintenance",appointment=v)
+
+
+@receiver(post_save, sender=GeneratedDocument)
+def report_published(sender, instance, raw=False, **kwargs):
+    if raw or instance.visibility!="customer" or instance.status!="ready" or not instance.published_at:
+        return
+    report=instance.inspection_report or instance.completion_card
+    if not report or getattr(report,"purpose","customer")!="customer" or report.status not in ("approved","pending_approval"):
+        return
+    approved=report.status=="approved"
+    machine=report.job_equipment
+    notify(machine.job.company,"report_approved" if approved else "report_approval",f"{report._meta.model_name}:{report.pk}:{report.status}",
+           "Service report approved" if approved else "Inspection awaiting approval",
+           f"Service {machine.reference}, version {report.version}: {report.get_status_display()}.",
+           "/documents",job_equipment=machine,document=instance)

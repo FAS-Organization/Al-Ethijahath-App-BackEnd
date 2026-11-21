@@ -44,7 +44,6 @@ TECHNICIAN_PATHS = {
     m.CompletionWorkItem: "card__technician__user", m.InternalPurchaseReport: "technician__user",
     m.InternalPurchaseReportLine: "report__technician__user",
 }
-GLOBAL_CONFIGURATION = (m.DocumentTemplate, m.AuditEvent)
 
 
 def scoped(queryset, user):
@@ -232,6 +231,16 @@ class RescheduleAdmin(ReadOnlyOperations):
     list_display = ("id","appointment","proposed_date","status","staff_actions")
 
 
+class MachineAdmin(WorkflowAdmin):
+    tasks = (("assign","Assign technician"),("service-progress","Record progress"))
+    readonly_fields = ("staff_actions","assigned_technician")
+
+
+class AssignmentAdmin(ReadOnlyOperations):
+    tasks = (("assignment-respond","Accept or decline"),)
+    list_display = ("id", "job_equipment", "technician", "purpose", "status", "staff_actions")
+
+
 class PaymentAdmin(ReadOnlyOperations):
     tasks = (("payment-void","Void entry"),)
 
@@ -253,6 +262,7 @@ class GroupAdmin(SuperuserManagement, admin.ModelAdmin):
 
 
 ADMIN_CLASSES = {
+    m.JobEquipment: MachineAdmin, m.JobAssignment: AssignmentAdmin,
     m.InspectionReport: ReportAdmin, m.JobCompletionCard: CompletionAdmin, m.Invoice: InvoiceAdmin,
     m.Quotation: QuoteAdmin, m.Payment: PaymentAdmin, m.EmployeeProfile: EmployeeAdmin,
     m.RentalItem: RentalItemAdmin, m.RentalOrder: RentalOrderAdmin, m.RescheduleRequest: RescheduleAdmin,
