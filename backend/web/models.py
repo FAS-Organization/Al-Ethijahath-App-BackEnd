@@ -11,7 +11,7 @@ CONFIRMED PHASE 1
 * Technicians enter professional inspections, separate internal purchase reports,
   progress and completion cards through a restricted Django admin interface.
 * Admin prepares versioned quotations; account holder accepts/rejects in portal.
-  Email sends a notification/link, not a separate quotation approval channel.
+  Customers can also request the exact PDF by email. Sales verifies their reply before approval.
 * Account holder maintains named authorized approvers without separate logins.
 * Inspection/completion: authorized person signs on tablet OR returns the FULL
   signed PDF by email. Sales Executive verifies and uploads emailed evidence.
@@ -56,7 +56,7 @@ from django.conf import settings
 from django.contrib.auth.models import AbstractUser, UserManager as DjangoUserManager
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction
 from django.db.models import F, Q, Sum
 from django.db.models.functions import Lower
 from django.utils import timezone
@@ -154,6 +154,7 @@ class User(AbstractUser):
         INACTIVE = "inactive", "Inactive"
         REJECTED = "rejected", "Rejected"
 
+    password_changed_at = models.DateTimeField(null=True, blank=True)
     username = None
     email = models.EmailField(unique=True)
     phone = models.CharField(max_length=30, blank=True)
@@ -241,6 +242,9 @@ class EmployeeProfile(Record):
 
 
 class CustomerCompany(Record):
+    region = models.ForeignKey(
+        Region, null=True, on_delete=models.PROTECT, related_name="companies"
+    )
     name = models.CharField(max_length=200)
     account_holder = models.OneToOneField(
         settings.AUTH_USER_MODEL,
@@ -260,6 +264,23 @@ class CustomerCompany(Record):
 
 
 class CustomerSite(Record):
+    kind = models.CharField(
+        max_length=16,
+        choices=[
+            ("branch", "Branch"),
+            ("warehouse", "Warehouse"),
+            ("sub_company", "Sub-company"),
+            ("other", "Other"),
+        ],
+        default="other",
+    )
+
+    def clean(self):
+        if self.company_id and self.company.region_id:
+            require_match(
+                self.region_id, self.company.region_id, "region", "Use the company's region."
+            )
+
     company = models.ForeignKey(
         CustomerCompany, on_delete=models.PROTECT, related_name="sites"
     )
@@ -419,6 +440,7 @@ class ServiceJob(Record):
     )
     site = models.ForeignKey(CustomerSite, on_delete=models.PROTECT)
     region = models.ForeignKey(Region, on_delete=models.PROTECT)
+    request_photo = models.ImageField(upload_to=private_upload_path, blank=True)
     site_address_snapshot = models.TextField(blank=True)
     job_type = models.CharField(max_length=12, choices=Kind)
     description = models.TextField()
@@ -606,6 +628,7 @@ class RescheduleRequest(Record):
     )
     original_start = models.DateTimeField()
     original_end = models.DateTimeField()
+    alternative_accepted_at = models.DateTimeField(null=True, blank=True)
     appointment_version = models.PositiveIntegerField()
     proposed_date = models.DateField()
     reason = models.TextField()
@@ -828,6 +851,7 @@ class DocumentApproval(Record):
         ON_SITE = "on_site", "On-screen signature"
         EMAIL = "email_link", "Legacy secure email link"
         EMAIL_ATTACHMENT = "email_attachment", "Verified returned signed PDF"
+        QUOTE_REPLY = "quote_reply", "Quotation reply verified by Sales"
 
     inspection_report = models.ForeignKey(
         InspectionReport,
@@ -891,6 +915,13 @@ class DocumentApproval(Record):
         related_name="approval_event",
     )
     # Immutable snapshots populated by service at decision time.
+    quote_email = models.OneToOneField(
+        "QuoteEmailRequest",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="decision",
+    )
     authority_snapshot = models.JSONField(default=dict, blank=True)
     document_sha256 = models.CharField(max_length=64, blank=True)
     # created_by identifies recorder/capturing technician, not necessarily signer.
@@ -898,27 +929,27 @@ class DocumentApproval(Record):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                condition=exactly_one(
-                    "inspection_report", "completion_card", "quotation"
-                ),
+                condition=exactly_one("inspection_report", "completion_card", "quotation"),
                 name="approval_exactly_one_document",
             ),
             models.CheckConstraint(
-                condition=~Q(method="email_attachment")
-                | Q(email_submission__isnull=False),
+                condition=~Q(method="email_attachment") | Q(email_submission__isnull=False),
                 name="email_approval_requires_evidence",
             ),
             models.CheckConstraint(
-                condition=Q(email_submission__isnull=True)
-                | Q(method="email_attachment"),
+                condition=Q(email_submission__isnull=True) | Q(method="email_attachment"),
                 name="email_evidence_matches_method",
             ),
             models.CheckConstraint(
                 condition=Q(quotation__isnull=True)
+                | Q(method="in_app", signer_role="customer", signing_user__isnull=False)
                 | Q(
-                    method="in_app", signer_role="customer", signing_user__isnull=False
+                    method="quote_reply",
+                    signer_role="customer",
+                    signing_user__isnull=False,
+                    quote_email__isnull=False,
                 ),
-                name="quote_approval_portal_customer",
+                name="quote_decision_authority",
             ),
         ]
 
@@ -959,7 +990,10 @@ class DocumentApproval(Record):
                 "Phase 1 report approval requires tablet signature or verified emailed PDF."
             )
         if self.quotation_id:
-            if self.method != self.Method.IN_APP or self.signer_role != "customer":
+            if (
+                self.method not in (self.Method.IN_APP, self.Method.QUOTE_REPLY)
+                or self.signer_role != "customer"
+            ):
                 raise ValidationError(
                     "Quotations are approved/rejected by the account holder in the portal."
                 )
@@ -988,6 +1022,18 @@ class DocumentApproval(Record):
                 raise ValidationError(
                     "Identify the account holder or a named authorized approver."
                 )
+        if self.method == self.Method.QUOTE_REPLY:
+            if (
+                not self.quotation_id
+                or not self.quote_email_id
+                or not self.reviewed_document_id
+                or self.quote_email.document_id != self.reviewed_document_id
+                or self.decision != "approved"
+                or not self.evidence_file
+            ):
+                raise ValidationError("Verify the reply and retain the exact emailed PDF version.")
+        elif self.quote_email_id:
+            raise ValidationError("A quotation email can only be linked to its verified reply.")
         if self.reviewed_document_id:
             require_source_match(self, self.reviewed_document)
         if self.method == self.Method.EMAIL_ATTACHMENT:
@@ -1113,6 +1159,48 @@ class Invoice(Record):
                 "Currency must match region.",
             )
 
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            return super().save(*args, **kwargs)
+        with transaction.atomic():
+            original = Invoice.objects.select_for_update().get(pk=self.pk)
+            if original.status != self.Status.DRAFT:
+                fixed = (
+                    "company_id",
+                    "region_id",
+                    "job_id",
+                    "number",
+                    "currency",
+                    "issue_date",
+                    "due_date",
+                    "issued_at",
+                    "subtotal",
+                    "discount",
+                    "tax_amount",
+                    "total",
+                    "billing_snapshot",
+                )
+                if any(getattr(self, field) != getattr(original, field) for field in fixed):
+                    raise ValidationError(
+                        "Preserve the issued invoice and record adjustments separately."
+                    )
+                if original.status != self.status and (
+                    original.status != self.Status.ISSUED
+                    or self.status != self.Status.VOID
+                    or not self.void_reason.strip()
+                    or original.amount_credited
+                    or original.amount_paid
+                ):
+                    raise ValidationError(
+                        "This invoice cannot be voided with posted payments or credits."
+                    )
+            return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status != self.Status.DRAFT:
+            raise ValidationError("Preserve issued and void invoices in the ledger.")
+        return super().delete(*args, **kwargs)
+
     @property
     def amount_paid(self):
         if not self.pk:
@@ -1125,15 +1213,23 @@ class Invoice(Record):
         )
 
     @property
+    def amount_credited(self):
+        if not self.pk:
+            return ZERO
+        return self.credit_notes.aggregate(total=Sum("amount"))["total"] or ZERO
+
+    @property
     def balance_due(self):
-        return self.total - self.amount_paid
+        if self.status == self.Status.VOID:
+            return ZERO
+        return self.total - self.amount_paid - self.amount_credited
 
     @property
     def payment_status(self):
         if self.status != self.Status.ISSUED:
             return "not_payable"
         paid = self.amount_paid
-        if paid >= self.total:
+        if paid + self.amount_credited >= self.total:
             return "paid"
         return "partially_paid" if paid > ZERO else "unpaid"
 
@@ -1307,8 +1403,99 @@ class Payment(Record):
                 "corrects",
                 "Correction must use the same invoice.",
             )
-        # Posting service must lock invoice, reject overpayment and non-issued
-        # invoices, and reuse request idempotency_key for retries.
+        if self.corrects_id and self.corrects.status != self.Status.VOID:
+            raise ValidationError(
+                {"corrects": "Void the original entry before posting a correction."}
+            )
+
+    def save(self, *args, **kwargs):
+        with transaction.atomic():
+            invoice = Invoice.objects.select_for_update().get(pk=self.invoice_id)
+            other_payments = invoice.payments.filter(status=self.Status.POSTED).exclude(pk=self.pk)
+            paid = other_payments.aggregate(total=Sum("amount"))["total"] or ZERO
+            if self.status == self.Status.POSTED:
+                if (
+                    invoice.status != Invoice.Status.ISSUED
+                    or Decimal(str(self.amount)) > invoice.total - paid - invoice.amount_credited
+                ):
+                    raise ValidationError(
+                        {"amount": "Payment exceeds the issued invoice's remaining balance."}
+                    )
+            if self.pk:
+                original = Payment.objects.select_for_update().get(pk=self.pk)
+                fixed = (
+                    "invoice_id",
+                    "amount",
+                    "paid_at",
+                    "method",
+                    "transaction_reference",
+                    "corrects_id",
+                    "idempotency_key",
+                )
+                if any(getattr(self, field) != getattr(original, field) for field in fixed):
+                    raise ValidationError(
+                        "Void and replace a posted payment to correct its details."
+                    )
+                if original.status == self.Status.VOID and self.status != original.status:
+                    raise ValidationError("A void payment cannot be reposted.")
+            return super().save(*args, **kwargs)
+
+
+class CreditNote(Record):
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="credit_notes")
+    number = models.CharField(max_length=80, unique=True)
+    amount = models.DecimalField(
+        max_digits=16, decimal_places=2, validators=[MinValueValidator(Decimal("0.01"))]
+    )
+    reason = models.CharField(max_length=500)
+    issued_at = models.DateTimeField(default=timezone.now, editable=False)
+
+    class Meta:
+        ordering = ["issued_at", "pk"]
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="credit_note_positive_amount"),
+            models.CheckConstraint(
+                condition=~Q(reason="") & ~Q(number=""), name="credit_note_identified"
+            ),
+        ]
+
+    def clean(self):
+        if not self.reason.strip():
+            raise ValidationError({"reason": "Explain the credit."})
+        if self.invoice_id and self._state.adding:
+            if self.invoice.status != Invoice.Status.ISSUED:
+                raise ValidationError({"invoice": "Only issued invoices may be credited."})
+            if self.amount is not None and self.amount > self.invoice.balance_due:
+                raise ValidationError({"amount": "The credit exceeds the remaining balance."})
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("An issued credit note cannot be edited.")
+        with transaction.atomic():
+            self.invoice = Invoice.objects.select_for_update().get(pk=self.invoice_id)
+            self.full_clean()
+            result = super().save(*args, **kwargs)
+            AuditEvent.objects.create(
+                actor=self.created_by,
+                action="credit_note.issued",
+                model_label=self._meta.label,
+                record_id=str(self.pk),
+                source="api" if getattr(self, "_from_api", False) else "admin",
+                changes={
+                    "invoice": self.invoice_id,
+                    "number": self.number,
+                    "amount": str(self.amount),
+                    "currency": self.invoice.currency,
+                },
+                reason=self.reason,
+            )
+            return result
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("An issued credit note cannot be deleted.")
+
+    def __str__(self):
+        return self.number
 
 
 class DocumentTemplate(Record):
@@ -1501,6 +1688,8 @@ class Notification(Record):
         INVOICE_ISSUED = "invoice_issued", "Invoice issued"
         PAYMENT_OVERDUE = "payment_overdue", "Payment overdue"
         PAYMENT_RECORDED = "payment_recorded", "Payment recorded"
+        CREDIT_ISSUED = "credit_issued", "Credit note issued"
+        AMC_SUMMARY = "amc_summary", "AMC monthly summary"
         RESCHEDULE_DECISION = "reschedule_decision", "Reschedule decision"
 
     recipient = models.ForeignKey(
@@ -2000,7 +2189,7 @@ class Quotation(Record):
     Customer PDF exposes customer_summary, total, currency and estimated time,
     not internal costs/profit breakdown. Tax is a manually entered amount.
     Initial validity is 7 days after sending; expiry/renewal handled by services.
-    Portal Accept/Reject only in Phase 1. No negotiation messaging module.
+    Portal decisions or Sales-verified email acceptance. No negotiation messaging module.
     """
 
     class Status(models.TextChoices):
@@ -2372,3 +2561,179 @@ class EmailApprovalSubmission(Record):
                 raise ValidationError("Verifier must be an active staff user.")
         # The verify service additionally checks Sales Executive permission,
         # company/region scope, current signer authority and actual file contents.
+
+
+class ServiceAccess(Record):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="service_access"
+    )
+    company = models.ForeignKey(
+        "web.CustomerCompany", on_delete=models.PROTECT, related_name="delegates"
+    )
+    is_enabled = models.BooleanField(default=True)
+    token_version = models.PositiveIntegerField(default=0)
+
+    @property
+    def enabled(self):
+        return self.is_enabled and self.company.is_active and self.company.account_holder.is_active
+
+
+class SharingChallenge(Record):
+    company = models.ForeignKey("web.CustomerCompany", on_delete=models.PROTECT, related_name="+")
+    target = models.ForeignKey(
+        "web.ServiceAccess", on_delete=models.PROTECT, related_name="+", null=True, blank=True
+    )
+    email = models.EmailField()
+    nonce = models.UUIDField(default=uuid4, editable=False, unique=True)
+    digest = models.CharField(max_length=64)
+    expires_at = models.DateTimeField(db_index=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    verified_at = models.DateTimeField(null=True, blank=True)
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+
+class ContactPreferences(Record):
+    company = models.OneToOneField(
+        "web.CustomerCompany", on_delete=models.CASCADE, related_name="preferences"
+    )
+    email = models.BooleanField(default=True)
+    whatsapp = models.BooleanField(default=True)
+    sms = models.BooleanField(default=False)
+    quotations = models.BooleanField(default=True)
+    visits = models.BooleanField(default=True)
+    payments = models.BooleanField(default=True)
+
+
+class RentalItem(Record):
+    region = models.ForeignKey("web.Region", on_delete=models.PROTECT, related_name="rental_items")
+    code = models.SlugField()
+    name = models.CharField(max_length=150)
+    category = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
+    icon = models.CharField(max_length=32, blank=True)
+    available = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["region", "code"], name="regional_rental_code"),
+        ]
+
+    def __str__(self):
+        return f"{self.region.name} · {self.name}"
+
+
+class RentalOrder(Record):
+    company = models.ForeignKey(
+        "web.CustomerCompany", on_delete=models.PROTECT, related_name="rental_orders"
+    )
+    region = models.ForeignKey("web.Region", on_delete=models.PROTECT, related_name="+")
+    status = models.CharField(
+        max_length=12,
+        choices=[("processing", "Pending"), ("confirmed", "Confirmed"), ("rejected", "Declined")],
+        default="processing",
+    )
+    reason = models.TextField(blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+"
+    )
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=~Q(status="rejected") | ~Q(reason=""), name="declined_rental_reason"
+            ),
+            models.CheckConstraint(
+                condition=Q(status="processing", reviewed_at=None, reviewed_by=None)
+                | Q(
+                    status__in=["confirmed", "rejected"],
+                    reviewed_at__isnull=False,
+                    reviewed_by__isnull=False,
+                ),
+                name="rental_review_actor",
+            ),
+        ]
+
+
+class RentalOrderLine(Record):
+    order = models.ForeignKey("web.RentalOrder", on_delete=models.PROTECT, related_name="items")
+    item = models.ForeignKey("web.RentalItem", on_delete=models.PROTECT, related_name="+")
+    name_snapshot = models.CharField(max_length=150)
+    quantity = models.PositiveIntegerField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["order", "item"], name="unique_rental_order_item"),
+            models.CheckConstraint(condition=Q(quantity__gt=0), name="positive_rental_line"),
+        ]
+
+
+class QuoteEmailRequest(Record):
+    document = models.ForeignKey(
+        "web.GeneratedDocument", on_delete=models.PROTECT, related_name="quote_mail"
+    )
+    recipient = models.EmailField()
+    sent_at = models.DateTimeField(null=True, blank=True)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["document", "recipient"], name="unique_quote_delivery"),
+        ]
+        permissions = [
+            ("verify_quotation_reply", "Verify a quotation acceptance received by email")
+        ]
+
+
+class PendingServiceCharge(Record):
+    job_equipment = models.ForeignKey(
+        "web.JobEquipment", on_delete=models.PROTECT, related_name="pending_charges"
+    )
+    amount = models.DecimalField(max_digits=16, decimal_places=2)
+    description = models.CharField(max_length=250)
+    invoice_line = models.OneToOneField(
+        "web.InvoiceLine", null=True, blank=True, on_delete=models.PROTECT
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    settled_offline_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=Q(amount__gt=0), name="pending_charge_positive"),
+            models.CheckConstraint(
+                condition=Q(invoice_line=None) | Q(settled_offline_at=None),
+                name="one_charge_settlement",
+            ),
+        ]
+
+    def clean(self):
+        if self.published_at and self.job_equipment_id and self.job_equipment.status != "completed":
+            raise ValidationError("Publish charges only for completed work.")
+        if self.invoice_line_id:
+            if (
+                self.invoice_line.job_equipment_id != self.job_equipment_id
+                or self.invoice_line.invoice.status != "issued"
+                or self.invoice_line.line_total != self.amount
+            ):
+                raise ValidationError("Link the issued line for this machine and amount.")
+
+
+class AMCMonthlySummary(Record):
+    contract = models.ForeignKey(
+        "web.AMCContract", on_delete=models.PROTECT, related_name="monthly_summaries"
+    )
+    month_start = models.DateField()
+    visits = models.JSONField(default=list, blank=True)
+    summary = models.TextField(blank=True)
+    file = models.FileField(upload_to=private_upload_path, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["contract", "month_start"], name="unique_contract_month"
+            ),
+        ]

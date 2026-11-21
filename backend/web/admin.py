@@ -9,6 +9,7 @@ from django.db import transaction
 from .models import CustomerCompany, User
 
 from . import models
+from .portal_admin import ADMIN_CLASSES, ScopedAdmin, SuperuserManagement, Group, GroupAdmin
 
 # Custom user forms: our User uses email instead of username.
 class CustomUserCreationForm(UserCreationForm):
@@ -24,7 +25,7 @@ class CustomUserChangeForm(UserChangeForm):
 
 
 @admin.register(models.User)
-class CustomUserAdmin(UserAdmin):
+class CustomUserAdmin(SuperuserManagement, UserAdmin):
     add_form = CustomUserCreationForm
     form = CustomUserChangeForm
     model = models.User
@@ -87,7 +88,7 @@ class CustomUserAdmin(UserAdmin):
 
 
 # Basic registration for initial local development.
-admin.site.register([
+for model in [
     models.Region,
     models.EmployeeProfile,
     models.CustomerCompany,
@@ -123,11 +124,22 @@ admin.site.register([
     models.Quotation,
     models.QuotationLine,
     models.EmailApprovalSubmission,
-])
+    models.RentalItem,
+    models.RentalOrder,
+    models.RentalOrderLine,
+    models.PendingServiceCharge,
+    models.QuoteEmailRequest,
+    models.AMCMonthlySummary,
+]:
+    admin.site.register(model, ADMIN_CLASSES.get(model, ScopedAdmin))
+
+admin.site.unregister(Group)
+admin.site.register(Group, GroupAdmin)
+
 
 # Audit records should be view-only in admin.
 @admin.register(models.AuditEvent)
-class AuditEventAdmin(admin.ModelAdmin):
+class AuditEventAdmin(ScopedAdmin):
     list_display = (
         "occurred_at",
         "actor",
@@ -158,6 +170,7 @@ class AuditEventAdmin(admin.ModelAdmin):
     def has_delete_permission(self, request, obj=None):
         return False
 
+
 class CustomerCompanyForm(forms.ModelForm):
     account_status = forms.ChoiceField(
         choices=User.Status.choices,
@@ -183,10 +196,20 @@ admin.site.unregister(CustomerCompany)
 
 
 @admin.register(CustomerCompany)
-class CustomerCompanyAdmin(admin.ModelAdmin):
+class CustomerCompanyAdmin(ScopedAdmin):
+    def get_readonly_fields(self, request, obj=None):
+        return [
+            *super().get_readonly_fields(request, obj),
+            *(
+                ["account_holder", "region"]
+                if obj and obj.region_id
+                else ["account_holder"] if obj else []
+            ),
+        ]
+
     form = CustomerCompanyForm
     list_display = ('name', 'contact_name', 'contact_email', 'contact_phone', 'regions', 'status', 'created_at')
-    list_filter = ('account_holder__account_status', 'sites__region', 'is_active')
+    list_filter = ("account_holder__account_status", "region", "is_active")
     search_fields = ('name', 'contact_name', 'contact_email', 'account_holder__email')
     ordering = ('-created_at',)
     list_select_related = ('account_holder',)
@@ -194,10 +217,10 @@ class CustomerCompanyAdmin(admin.ModelAdmin):
     @admin.display(description='Account status', ordering='account_holder__account_status')
     def status(self, obj):
         return obj.account_holder.get_account_status_display()
-        
+
     @admin.display(description='Region')
     def regions(self, obj):
-        return ', '.join(sorted({s.region.name for s in obj.sites.all()})) or '-'
+        return obj.region.name if obj.region_id else "Needs regional review"
 
     def get_queryset(self, request):
         return super().get_queryset(request).prefetch_related('sites__region')
@@ -232,7 +255,43 @@ class CustomerCompanyAdmin(admin.ModelAdmin):
             return
         transaction.on_commit(
             lambda: send_mail(
-                subject, body, settings.DEFAULT_FROM_EMAIL, [user.email],
+                subject,
+                body,
+                settings.DEFAULT_FROM_EMAIL,
+                [user.email],
                 fail_silently=True,
             )
         )
+
+
+@admin.register(models.CreditNote)
+class CreditNoteAdmin(ScopedAdmin):
+    list_display = ("number", "invoice", "amount", "issued_at", "created_by")
+    fields = ("invoice", "number", "amount", "reason")
+    search_fields = ("number", "invoice__number", "invoice__company__name")
+
+    def get_queryset(self, request):
+        rows = super().get_queryset(request).select_related("invoice", "created_by")
+        employee = getattr(request.user, "employee", None)
+        if request.user.is_superuser or (employee and employee.global_scope):
+            return rows
+        return rows.filter(invoice__region_id=employee.region_id) if employee else rows.none()
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "invoice":
+            rows = models.Invoice.objects.filter(status="issued")
+            employee = getattr(request.user, "employee", None)
+            if not request.user.is_superuser and not (employee and employee.global_scope):
+                rows = rows.filter(region_id=employee.region_id) if employee else rows.none()
+            kwargs["queryset"] = rows
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        obj.created_by = request.user
+        super().save_model(request, obj, form, change)

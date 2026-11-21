@@ -72,7 +72,12 @@ def login_view(request):
     if company is not None and not company.is_active:
         return fail('inactive', 403)
 
+    grant = getattr(user, "service_access", None)
+    if grant and not grant.enabled:
+        return fail("inactive", 403)
     refresh = RefreshToken.for_user(user)
+    if grant:
+        refresh["access_version"] = grant.token_version
     return Response({
         'access': str(refresh.access_token),
         'refresh': str(refresh),
@@ -109,7 +114,11 @@ def register_view(request):
         errors['password'] = ' '.join(exc.messages)
     region = None
     try:
-        region = Region.objects.get(pk=int(data.get('regionId')), is_active=True)
+        candidates = Region.objects.filter(is_active=True, name__iregex=r"^(Riyadh|Jeddah|Dammam)$")
+        if data.get("regionId") is not None:
+            region = candidates.get(pk=int(data["regionId"]))
+        else:
+            region = candidates.get(name__iexact=str(data.get("region") or "").strip())
     except (TypeError, ValueError, Region.DoesNotExist):
         errors['regionId'] = 'Select your region.'
     if errors:
@@ -143,8 +152,9 @@ def register_view(request):
             user.save()
             company = CustomerCompany.objects.create(
                 name=company_name,
+                region=region,
                 account_holder=user,
-                billing_address='',
+                billing_address="",
                 contact_name=full_name,
                 contact_email=email,
                 contact_phone=phone,
@@ -184,5 +194,7 @@ def me_view(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def regions_view(request):
-    regions = Region.objects.filter(is_active=True).order_by('name')
-    return Response([{'id': r.id, 'name': r.name, 'code': r.code} for r in regions])
+    regions = Region.objects.filter(
+        is_active=True, name__iregex=r"^(Riyadh|Jeddah|Dammam)$"
+    ).order_by("name")
+    return Response([{"id": r.id, "name": r.name, "code": r.code} for r in regions])

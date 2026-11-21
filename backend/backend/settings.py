@@ -34,14 +34,15 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 ROOT_URLCONF = 'backend.urls'
@@ -110,6 +111,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 
 # Email
@@ -127,25 +129,71 @@ AUTH_USER_MODEL = 'web.User'
 
 # --- API ---
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "accounts.authentication.PortalAuthentication",
+        "accounts.authentication.StaffSessionAuthentication",
     ),
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
-    ),
-    'EXCEPTION_HANDLER': 'accounts.utils.api_exception_handler',
-    'DEFAULT_THROTTLE_RATES': {'login': '10/min', 'register': '5/hour'},
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
+    "EXCEPTION_HANDLER": "accounts.utils.api_exception_handler",
+    "DEFAULT_THROTTLE_RATES": {"login": "10/min", "register": "5/hour"},
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=30),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': True,
-    'BLACKLIST_AFTER_ROTATION': True,
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=30),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "CHECK_REVOKE_TOKEN": True,
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
 }
 
 # React dev servers (add the real website address before launch)
 CORS_ALLOWED_ORIGINS = os.getenv(
-    'CORS_ALLOWED_ORIGINS',
-    'http://localhost:5173,http://localhost:3000',
-).split(',')
+    "CORS_ALLOWED_ORIGINS",
+    "http://localhost:5173,http://localhost:3000",
+).split(",")
+
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "").lower() == "true"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "").lower() == "true"
+EMAIL_TIMEOUT = 15
+CSRF_TRUSTED_ORIGINS = [
+    v.strip() for v in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if v.strip()
+]
+if not DEBUG and SECRET_KEY == "dev-only-insecure-key":
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured("Set a private SECRET_KEY when DEBUG is false.")
+if os.getenv("POSTGRES_DB") or os.getenv("DB_NAME"):
+    DATABASES["default"] = {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.getenv("POSTGRES_DB") or os.environ["DB_NAME"],
+        "USER": os.getenv("POSTGRES_USER") or os.getenv("DB_USER", ""),
+        "PASSWORD": os.getenv("POSTGRES_PASSWORD") or os.getenv("DB_PASSWORD", ""),
+        "HOST": os.getenv("POSTGRES_HOST") or os.getenv("DB_HOST", ""),
+        "PORT": os.getenv("POSTGRES_PORT") or os.getenv("DB_PORT", "5432"),
+    }
+else:
+    DATABASES["default"]["OPTIONS"] = {"transaction_mode": "IMMEDIATE", "timeout": 15}
+if os.getenv("R2_PRIVATE_BUCKET"):
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "bucket_name": os.environ["R2_PRIVATE_BUCKET"],
+                "endpoint_url": os.environ["R2_ENDPOINT_URL"],
+                "access_key": os.environ["R2_ACCESS_KEY_ID"],
+                "secret_key": os.environ["R2_SECRET_ACCESS_KEY"],
+                "region_name": "auto",
+                "signature_version": "s3v4",
+                "default_acl": None,
+                "file_overwrite": False,
+                "custom_domain": None,
+                "querystring_auth": True,
+                "querystring_expire": 60,
+            },
+        },
+        "staticfiles": {"BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"},
+    }

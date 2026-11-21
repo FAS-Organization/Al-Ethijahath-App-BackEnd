@@ -2,6 +2,8 @@ from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
+from django.db import transaction
+from rest_framework.exceptions import ValidationError
 from .permissions import IsCustomer
 from .serializers import ProfileSerializer, SiteSerializer
 
@@ -23,7 +25,14 @@ def profile_view(request):
     if request.method == 'PATCH':
         serializer = ProfileSerializer(company, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
+        with transaction.atomic():
+            serializer.save()
+            user = request.user
+            if "contact_name" in serializer.validated_data:
+                user.first_name, _, user.last_name = company.contact_name.partition(" ")
+            if "contact_phone" in serializer.validated_data:
+                user.phone = company.contact_phone
+            user.save(update_fields=["first_name", "last_name", "phone"])
     return Response(profile_payload(company))
 
 
@@ -34,7 +43,10 @@ def sites_view(request):
     if request.method == 'POST':
         serializer = SiteSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save(company=company, created_by=request.user)
+        selected = serializer.validated_data.get("region")
+        if not company.region_id or (selected and selected.pk != company.region_id):
+            raise ValidationError({"region": "Add sites in the registered account region."})
+        serializer.save(company=company, region=company.region, created_by=request.user)
         return Response(serializer.data, status=201)
     sites = company.sites.filter(is_active=True).select_related('region').order_by('name')
     return Response(SiteSerializer(sites, many=True).data)
