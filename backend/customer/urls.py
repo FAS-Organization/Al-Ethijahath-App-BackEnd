@@ -1,8 +1,19 @@
 from django.urls import path
 
-from . import account, ledger, rentals, requests, sharing, views
+from . import decisions, documents, records, schedule, account, ledger, rentals, requests, sharing, views
 
 urlpatterns = [
+    path("files/<str:kind>/<int:pk>/", documents.download, name="portal-file"),
+    path("documents/", documents.documents),
+    path("services/", records.collection, {"section":"services"}),
+    path("equipment/", records.collection, {"section":"equipment"}),
+    path("billing/", records.collection, {"section":"billing"}),
+    path("quotations/", records.collection, {"section":"quotations"}),
+    path("quotations/<int:pk>/decision/", decisions.quote_action, {"action":"decision"}),
+    path("quotations/<int:pk>/email/", decisions.quote_action, {"action":"email"}),
+    path("maintenance/", schedule.schedule),
+    path("appointments/<int:pk>/reschedule/", schedule.request_date),
+    path("reschedules/<int:pk>/respond/", schedule.respond),
     path("account/", account.account),
     path("account/preferences/", account.preferences),
     path("account/password/", account.password),
