@@ -151,11 +151,11 @@ def schedule(request):
                 {
                     "id": i.pk,
                     "date": i.issue_date,
-                    "total": str(i.total),
-                    "invoiced": str(i.total),
-                    "outstanding": str(i.balance_due),
-                    "credited": str(i.amount_credited),
-                    "paid": str(i.amount_paid),
+                    "total": f"{i.total:.2f}",
+                    "invoiced": f"{i.total:.2f}",
+                    "outstanding": f"{i.balance_due:.2f}",
+                    "credited": f"{i.amount_credited:.2f}",
+                    "paid": f"{i.amount_paid:.2f}",
                     "currency": i.currency,
                 }
                 for i in c.invoices.filter(status="issued")
